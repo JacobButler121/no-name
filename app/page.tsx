@@ -1,126 +1,419 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
+
+type EventType =
+  | "retrieving_video"
+  | "extracting_frames"
+  | "analyzing_frame"
+  | "candidate_found"
+  | "merging_duplicates"
+  | "searching_retailers"
+  | "product_ready"
+  | "retrieval_blocked"
+  | "completed"
+  | "failed";
 
 type Product = {
+  id: string;
   name: string;
+  brand: string;
   category: string;
-  timestamp: string;
-  price: string;
+  description: string;
+  match: "exact" | "similar" | "possible";
   confidence: number;
-  query: string;
-  className: string;
+  price: string;
+  retailer: string;
+  retailerUrl: string;
+  timestamps: number[];
+  color: string;
+  box: { x: number; y: number; width: number; height: number };
 };
 
-const products: Product[] = [
-  { name: "NuPhy Air75 V2", category: "Low-profile keyboard", timestamp: "00:04", price: "$109", confidence: 98, query: "NuPhy Air75 V2", className: "keyboard" },
-  { name: "Anglepoise Type 75", category: "Desk lamp", timestamp: "00:13", price: "$315", confidence: 94, query: "Anglepoise Type 75 desk lamp", className: "lamp" },
-  { name: "Sony WH-1000XM5", category: "Noise-canceling headphones", timestamp: "00:23", price: "$399", confidence: 96, query: "Sony WH-1000XM5 headphones", className: "headphones" },
+type JobResponse = {
+  id?: string;
+  job_id?: string;
+  status?: string;
+  products?: Product[];
+  results?: { products?: Product[] };
+};
+
+const fixture: Product[] = [
+  {
+    id: "air75",
+    name: "Air75 V2",
+    brand: "NuPhy",
+    category: "Low-profile keyboard",
+    description: "75% wireless mechanical keyboard · Basalt Black",
+    match: "exact",
+    confidence: 98,
+    price: "$119.95",
+    retailer: "NuPhy",
+    retailerUrl: "https://nuphy.com/products/air75-v2",
+    timestamps: [4, 18, 27],
+    color: "graphite",
+    box: { x: 14, y: 59, width: 52, height: 18 },
+  },
+  {
+    id: "lamp",
+    name: "Type 75 Desk Lamp",
+    brand: "Anglepoise",
+    category: "Task lighting",
+    description: "Adjustable desk lamp · Jet Black",
+    match: "similar",
+    confidence: 91,
+    price: "$340.00",
+    retailer: "Anglepoise",
+    retailerUrl: "https://www.anglepoise.com/products/type-75-desk-lamp",
+    timestamps: [9, 21],
+    color: "sand",
+    box: { x: 68, y: 17, width: 20, height: 55 },
+  },
+  {
+    id: "headphones",
+    name: "WH-1000XM5",
+    brand: "Sony",
+    category: "Headphones",
+    description: "Wireless noise canceling headphones · Black",
+    match: "exact",
+    confidence: 96,
+    price: "$399.99",
+    retailer: "Sony",
+    retailerUrl: "https://electronics.sony.com/audio/headphones/headband/p/wh1000xm5-b",
+    timestamps: [14, 24],
+    color: "blue",
+    box: { x: 72, y: 28, width: 18, height: 31 },
+  },
+  {
+    id: "bottle",
+    name: "24 oz Standard Mouth",
+    brand: "Hydro Flask",
+    category: "Drinkware",
+    description: "Insulated stainless steel bottle · White",
+    match: "possible",
+    confidence: 73,
+    price: "$39.95",
+    retailer: "Hydro Flask",
+    retailerUrl: "https://www.hydroflask.com/24-oz-standard-mouth",
+    timestamps: [7],
+    color: "white",
+    box: { x: 6, y: 25, width: 10, height: 34 },
+  },
 ];
 
-const steps = [
-  "Opening video and mapping scenes",
-  "Reading on-screen labels and logos",
-  "Matching visual product candidates",
-  "Searching verified retailer listings",
-  "Checking availability and price",
+const progressCopy: Record<EventType, string> = {
+  retrieving_video: "Retrieving video",
+  extracting_frames: "Mapping scenes",
+  analyzing_frame: "Analyzing frame",
+  candidate_found: "Candidate found",
+  merging_duplicates: "Merging repeat sightings",
+  searching_retailers: "Checking trusted retailers",
+  product_ready: "Product match ready",
+  retrieval_blocked: "Upload needed",
+  completed: "Analysis complete",
+  failed: "Analysis stopped",
+};
+
+const demoEvents: EventType[] = [
+  "retrieving_video",
+  "extracting_frames",
+  "analyzing_frame",
+  "candidate_found",
+  "merging_duplicates",
+  "searching_retailers",
+  "product_ready",
+  "completed",
 ];
+
+function formatTime(seconds: number) {
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.floor(seconds % 60);
+  return `${mins}:${secs.toString().padStart(2, "0")}`;
+}
+
+function normalizeProducts(data: JobResponse): Product[] {
+  const products = data.products ?? data.results?.products ?? [];
+  return products.map((product, index) => ({
+    ...product,
+    id: product.id ?? `product-${index}`,
+    brand: product.brand ?? "Unconfirmed brand",
+    description: product.description ?? product.category ?? "Product match",
+    match: product.match ?? "similar",
+    confidence: product.confidence ?? 0,
+    price: product.price ?? "View price",
+    retailer: product.retailer ?? "Retailer",
+    retailerUrl: product.retailerUrl ?? "#",
+    timestamps: product.timestamps ?? [],
+    color: product.color ?? "graphite",
+    box: product.box ?? { x: 18, y: 22, width: 35, height: 35 },
+  }));
+}
 
 export default function Home() {
   const [url, setUrl] = useState("");
-  const [progress, setProgress] = useState(0);
-  const [isRunning, setIsRunning] = useState(false);
-  const [isComplete, setIsComplete] = useState(false);
-  const [activeProduct, setActiveProduct] = useState(0);
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [status, setStatus] = useState<"idle" | "running" | "complete" | "blocked" | "error">("idle");
+  const [eventType, setEventType] = useState<EventType>("retrieving_video");
+  const [eventIndex, setEventIndex] = useState(0);
+  const [products, setProducts] = useState<Product[]>(fixture);
+  const [activeId, setActiveId] = useState(fixture[0].id);
+  const [currentTime, setCurrentTime] = useState(4);
+  const [error, setError] = useState("");
+  const [isFixture, setIsFixture] = useState(true);
+  const [mobileResults, setMobileResults] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const activeProduct = products.find((product) => product.id === activeId) ?? products[0];
 
   useEffect(() => {
-    if (!isRunning) return;
-    if (progress >= steps.length) {
-      setIsRunning(false);
-      setIsComplete(true);
+    if (status !== "running" || !isFixture) return;
+    if (eventIndex >= demoEvents.length - 1) {
+      setStatus("complete");
+      setEventType("completed");
       return;
     }
-    const timer = window.setTimeout(() => setProgress((value) => value + 1), 820);
+    const timer = window.setTimeout(() => {
+      const next = eventIndex + 1;
+      setEventIndex(next);
+      setEventType(demoEvents[next]);
+      if (next >= 3) setProducts(fixture.slice(0, Math.min(next - 2, fixture.length)));
+    }, 620);
     return () => window.clearTimeout(timer);
-  }, [isRunning, progress]);
+  }, [eventIndex, isFixture, status]);
 
-  const startFinding = () => {
-    setProgress(0);
-    setIsComplete(false);
-    setIsRunning(true);
-    if (!url) setUrl("https://www.youtube.com/watch?v=desk-setup-tour");
-  };
+  useEffect(() => {
+    if (!jobId || isFixture || status !== "running") return;
+    const stream = new EventSource(`/api/jobs/${encodeURIComponent(jobId)}/events`);
+    stream.onmessage = (message) => {
+      try {
+        const payload = JSON.parse(message.data) as { type: EventType; product?: Product; message?: string };
+        setEventType(payload.type);
+        if (payload.type === "product_ready" && payload.product) {
+          setProducts((current) => [...current.filter((item) => item.id !== payload.product?.id), payload.product!]);
+        }
+        if (payload.type === "retrieval_blocked") {
+          setStatus("blocked");
+          setError(payload.message ?? "This platform blocked retrieval. Upload the video to keep going.");
+          stream.close();
+        }
+        if (payload.type === "failed") {
+          setStatus("error");
+          setError(payload.message ?? "The processor could not finish this video.");
+          stream.close();
+        }
+        if (payload.type === "completed") {
+          stream.close();
+          void fetchJob(jobId);
+        }
+      } catch {
+        // Ignore malformed heartbeat messages from a tunnel or proxy.
+      }
+    };
+    stream.onerror = () => stream.close();
+    return () => stream.close();
+  }, [isFixture, jobId, status]);
 
-  const reset = () => {
-    setProgress(0);
-    setIsRunning(false);
-    setIsComplete(false);
-  };
+  async function fetchJob(id: string) {
+    try {
+      const response = await fetch(`/api/jobs/${encodeURIComponent(id)}`);
+      if (!response.ok) throw new Error("Could not load the completed findings.");
+      const data = (await response.json()) as JobResponse;
+      const nextProducts = normalizeProducts(data);
+      setProducts(nextProducts);
+      setActiveId(nextProducts[0]?.id ?? "");
+      setStatus("complete");
+    } catch (reason) {
+      setStatus("error");
+      setError(reason instanceof Error ? reason.message : "Could not load findings.");
+    }
+  }
+
+  async function submitUrl(event: FormEvent) {
+    event.preventDefault();
+    if (!url.trim()) return;
+    setStatus("running");
+    setEventType("retrieving_video");
+    setProducts([]);
+    setError("");
+    setIsFixture(false);
+    setMobileResults(false);
+    try {
+      const response = await fetch("/api/jobs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url: url.trim() }),
+      });
+      const data = (await response.json()) as JobResponse & { message?: string };
+      if (!response.ok) throw new Error(data.message ?? "The video processor is unavailable.");
+      const id = data.id ?? data.job_id;
+      if (!id) throw new Error("The processor did not return a job ID.");
+      setJobId(id);
+    } catch (reason) {
+      setStatus("error");
+      setError(reason instanceof Error ? reason.message : "Could not start this video.");
+    }
+  }
+
+  function runDemo() {
+    setUrl("https://youtube.com/watch?v=desk-setup-tour");
+    setJobId(null);
+    setStatus("running");
+    setEventType("retrieving_video");
+    setEventIndex(0);
+    setProducts([]);
+    setError("");
+    setIsFixture(true);
+    setMobileResults(false);
+  }
+
+  async function uploadVideo(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const form = new FormData();
+    form.append("video", file);
+    setStatus("running");
+    setEventType("retrieving_video");
+    setProducts([]);
+    setError("");
+    setIsFixture(false);
+    try {
+      const response = await fetch("/api/jobs/upload", { method: "POST", body: form });
+      const data = (await response.json()) as JobResponse & { message?: string };
+      if (!response.ok) throw new Error(data.message ?? "The upload could not be started.");
+      const id = data.id ?? data.job_id;
+      if (!id) throw new Error("The processor did not return a job ID.");
+      setJobId(id);
+    } catch (reason) {
+      setStatus("error");
+      setError(reason instanceof Error ? reason.message : "Could not upload this video.");
+    }
+  }
+
+  function seek(product: Product, timestamp: number) {
+    setActiveId(product.id);
+    setCurrentTime(timestamp);
+    setMobileResults(false);
+    if (videoRef.current) {
+      videoRef.current.currentTime = timestamp;
+      void videoRef.current.play().catch(() => undefined);
+    }
+  }
+
+  const mainProducts = products.filter((product) => product.match !== "possible");
+  const possibleProducts = products.filter((product) => product.match === "possible");
+  const progress = Math.max(7, ((demoEvents.indexOf(eventType) + 1) / demoEvents.length) * 100);
 
   return (
-    <main>
-      <nav className="nav shell">
-        <a className="brand" href="#top">Scene<span>Cart</span><i /></a>
-        <div className="nav-center"><a href="#how">How it works</a><a href="#results">Examples</a></div>
-        <button className="nav-button" onClick={() => document.getElementById("finder")?.scrollIntoView({ behavior: "smooth" })}>Find products <span>↗</span></button>
-      </nav>
+    <main className="app-shell">
+      <header className="topbar">
+        <a className="logo" href="#top" aria-label="Spotted home"><span className="logo-mark">S</span>Spotted</a>
+        <div className="topbar-center"><span className="live-dot" />AI video shopping</div>
+        <button className="header-action" onClick={() => document.getElementById("composer")?.focus()}>New search <span>↗</span></button>
+      </header>
 
-      <section className="hero shell" id="top">
-        <div className="hero-copy">
-          <p className="eyebrow"><span className="dot" /> MULTIMODAL SHOPPING INTELLIGENCE</p>
-          <h1>See it.<br /><em>Shop it.</em></h1>
-          <p>Paste any video link. SceneCart watches for products, searches the web, and gives you the exact moment to buy.</p>
+      <section className="intro" id="top">
+        <div>
+          <p className="kicker">See it. Find it.</p>
+          <h1>Turn any video<br />into a <em>shopping list.</em></h1>
         </div>
-        <div className="hero-note"><span>01</span> From video to verified products<br />in one intelligent run.</div>
+        <p className="intro-note">Paste a public video. Spotted finds the products, remembers every appearance, and checks the web for the closest buyable match.</p>
       </section>
 
-      <section className="finder-wrap shell" id="finder">
-        <div className="finder-card">
-          <div className="finder-label"><span>DROP A LINK</span><small>YOUTUBE · TIKTOK · INSTAGRAM REELS</small></div>
-          <div className="search-row">
-            <span className="link-icon">↗</span>
-            <input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="Paste a video link to find every product inside…" aria-label="Video URL" />
-            <button onClick={startFinding} disabled={isRunning}>{isRunning ? "Searching…" : "Find products"}<span>→</span></button>
+      <form className="composer" onSubmit={submitUrl}>
+        <label htmlFor="composer">Video link</label>
+        <div className="composer-row">
+          <span className="composer-icon">↗</span>
+          <input id="composer" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="Paste a YouTube, TikTok, or Instagram link" inputMode="url" />
+          <button type="submit" disabled={!url.trim() || status === "running"}>{status === "running" && !isFixture ? "Analyzing" : "Find products"}<span>→</span></button>
+        </div>
+        <div className="composer-meta">
+          <div className="platforms"><span>YouTube</span><i /> <span>TikTok</span><i /> <span>Instagram</span></div>
+          <div className="composer-links"><button type="button" onClick={runDemo}>Run the 30-second demo</button><button type="button" onClick={() => fileRef.current?.click()}>or upload a video</button></div>
+        </div>
+        <input ref={fileRef} className="file-input" type="file" accept="video/mp4,video/quicktime,video/webm" onChange={uploadVideo} />
+      </form>
+
+      {(status === "error" || status === "blocked") && (
+        <div className="notice" role="alert"><div><strong>{status === "blocked" ? "This link needs a handoff" : "Couldn’t reach the processor"}</strong><p>{error}</p></div><button onClick={() => fileRef.current?.click()}>Upload video <span>↑</span></button></div>
+      )}
+
+      <section className={`workspace ${status === "running" ? "is-running" : ""}`} aria-label="Video findings workspace">
+        <div className="video-column">
+          <div className="panel-heading">
+            <div><span className="step-number">01</span><div><strong>Video</strong><small>{isFixture ? "Desk setup tour · 0:31" : jobId ? `Job ${jobId.slice(0, 8)}` : "Ready for a link"}</small></div></div>
+            <span className="source-badge">{isFixture ? "Demo preview" : "Live analysis"}</span>
           </div>
-          <div className="source-pills"><span>▶ YouTube</span><span>♪ TikTok</span><span>◎ Instagram</span><button onClick={() => { setUrl("https://www.youtube.com/watch?v=desk-setup-tour"); startFinding(); }}>Try our desk setup demo →</button></div>
+
+          <div className="video-stage">
+            {!isFixture && jobId ? (
+              <video ref={videoRef} controls src={`/api/jobs/${encodeURIComponent(jobId)}/media`} onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)} />
+            ) : (
+              <div className="desk-scene" role="img" aria-label="Stylized desk setup video preview">
+                <div className="scene-window"><i /><i /><i /><span /></div>
+                <div className="scene-lamp"><i /><i /></div>
+                <div className="scene-monitor"><span>SPOTTED</span></div>
+                <div className="scene-keyboard" />
+                <div className="scene-headphones" />
+                <div className="scene-bottle" />
+                <div className="scene-desk" />
+                <div className="scene-light" />
+              </div>
+            )}
+            {activeProduct && status !== "running" && <div className="detection-box" style={{ left: `${activeProduct.box.x}%`, top: `${activeProduct.box.y}%`, width: `${activeProduct.box.width}%`, height: `${activeProduct.box.height}%` }}><span>{activeProduct.brand} · {Math.round(activeProduct.confidence)}%</span></div>}
+            <div className="video-topline"><span>SCENE 04</span><span>1080P</span></div>
+            {isFixture && <div className="video-controls"><button aria-label="Play demo">▶</button><div className="video-track"><span style={{ width: `${(currentTime / 31) * 100}%` }} />{fixture.map((product) => product.timestamps.map((time) => <i key={`${product.id}-${time}`} style={{ left: `${(time / 31) * 100}%` }} />))}</div><time>{formatTime(currentTime)} / 0:31</time></div>}
+          </div>
+
+          <div className="moments">
+            <div><span className="moment-count">{products.reduce((sum, product) => sum + product.timestamps.length, 0).toString().padStart(2, "0")}</span><span>Product moments<br />across {products.length || "—"} unique finds</span></div>
+            <div className="moment-list">{products.flatMap((product) => product.timestamps.map((time) => <button key={`${product.id}-${time}`} className={activeId === product.id && currentTime === time ? "active" : ""} onClick={() => seek(product, time)}><span>{formatTime(time)}</span>{product.brand}</button>))}</div>
+          </div>
         </div>
 
-        {(isRunning || isComplete) && (
-          <section className="run-card" aria-live="polite">
-            <div className="run-heading"><div><span className="run-dot" /> {isComplete ? "Search run finished" : "AI search run"}</div><span className={`run-status ${isComplete ? "done" : ""}`}>{isComplete ? "Found 3 products" : "1 running"}</span></div>
-            <div className="run-body">
-              <div className="run-title"><b>{isComplete ? "Products are ready to shop" : "Finding products in this video"}</b><button onClick={reset}>{isComplete ? "New search" : "Minimize"} <span>↘</span></button></div>
-              <ol className="run-steps">
-                {steps.map((step, index) => <li className={index < progress ? "complete" : index === progress && isRunning ? "current" : ""} key={step}><i>{index < progress ? "✓" : ""}</i>{step}</li>)}
-              </ol>
-              <div className="progress-bar"><span style={{ width: `${(progress / steps.length) * 100}%` }} /></div>
-              <div className="run-footer"><div className="query-pills"><span className={progress > 1 ? "complete" : ""}>{progress > 1 ? "✓" : ""} brand + model</span><span className={progress > 2 ? "complete" : ""}>{progress > 2 ? "✓" : ""} visual match</span><span className={progress > 3 ? "complete" : ""}>{progress > 3 ? "✓" : ""} web listings</span></div><button onClick={reset}>↻ Reset</button></div>
+        <div className={`results-column ${mobileResults ? "mobile-open" : ""}`}>
+          <div className="panel-heading">
+            <div><span className="step-number">02</span><div><strong>Findings</strong><small>{status === "running" ? progressCopy[eventType] : `${products.length} unique products`}</small></div></div>
+            {status === "complete" && <span className="complete-badge"><i />Complete</span>}
+          </div>
+
+          {status === "running" ? (
+            <div className="processing" aria-live="polite">
+              <div className="scan-orbit"><span>{Math.round(progress)}%</span><i /><i /><i /></div>
+              <h2>{progressCopy[eventType]}</h2>
+              <p>Spotted is reading visual evidence, merging repeat appearances, and checking trustworthy product pages.</p>
+              <div className="processing-bar"><span style={{ width: `${progress}%` }} /></div>
+              <ol>{demoEvents.slice(0, -1).map((item, index) => <li className={index < demoEvents.indexOf(eventType) ? "done" : index === demoEvents.indexOf(eventType) ? "active" : ""} key={item}><i>{index < demoEvents.indexOf(eventType) ? "✓" : index + 1}</i>{progressCopy[item]}</li>)}</ol>
             </div>
-          </section>
-        )}
-      </section>
-
-      <section className={`results shell ${isComplete ? "visible" : ""}`} id="results">
-        <div className="results-intro"><div><p className="eyebrow"><span className="dot" /> VERIFIED RESULTS</p><h2>Found in this<br /><em>video.</em></h2></div><p>Every match is grounded in visual evidence, spoken context, and live web search—not a guess.</p></div>
-        <div className="result-grid">
-          <div className="video-result">
-            <div className="scene-poster"><div className="scene-shade" /><span className="scene-label">DESK SETUP TOUR</span><button className="scene-play">▶</button><span className="scene-time">00:04 / 00:31</span><div className="scene-progress"><i /></div></div>
-            <div className="scene-scrubber">{products.map((product, index) => <button className={activeProduct === index ? "active" : ""} onClick={() => setActiveProduct(index)} key={product.name} style={{ left: `${18 + index * 31}%` }} aria-label={`View ${product.name}`}><i /></button>)}</div>
-          </div>
-          <div className="matches">
-            <div className="matches-heading"><span>SHOP THE MOMENT</span><span>3 MATCHES</span></div>
-            {products.map((product, index) => <article className={`match ${activeProduct === index ? "active" : ""}`} key={product.name} onMouseEnter={() => setActiveProduct(index)}>
-              <div className={`product-art ${product.className}`}><i /></div>
-              <div className="match-copy"><span>{product.category}</span><h3>{product.name}</h3><p><b>{product.confidence}% match</b> · seen at <button onClick={() => setActiveProduct(index)}>{product.timestamp}</button></p></div>
-              <div className="shop"><strong>{product.price}</strong><a href={`https://www.google.com/search?q=${encodeURIComponent(product.query)}`} target="_blank" rel="noreferrer">Shop ↗</a></div>
-            </article>)}
-          </div>
+          ) : (
+            <div className="findings-scroll">
+              <div className="results-summary"><div><strong>{mainProducts.length.toString().padStart(2, "0")}</strong><span>High-confidence<br />findings</span></div><p><i />Exact match <b>{mainProducts.filter((p) => p.match === "exact").length}</b></p></div>
+              <div className="product-list">
+                {mainProducts.map((product, index) => <ProductCard key={product.id} product={product} index={index} active={activeId === product.id} onSelect={() => seek(product, product.timestamps[0] ?? 0)} onTime={(time) => seek(product, time)} />)}
+              </div>
+              {possibleProducts.length > 0 && <div className="possible-section"><div className="possible-title"><span>Possible finds</span><small>Lower confidence · review suggested</small></div>{possibleProducts.map((product, index) => <ProductCard key={product.id} product={product} index={mainProducts.length + index} active={activeId === product.id} onSelect={() => seek(product, product.timestamps[0] ?? 0)} onTime={(time) => seek(product, time)} />)}</div>}
+            </div>
+          )}
         </div>
       </section>
 
-      <section className="how" id="how"><div className="shell how-grid"><div><p className="eyebrow"><span className="dot" /> HOW THE MODEL FINDS</p><h2>It watches<br />like a <em>shopper.</em></h2></div><div className="how-copy"><p>SceneCart combines the frame, the words spoken in the video, text on packaging, and live product listings to find the best match.</p><div><span>01</span><b>See</b> · recognize the object, brand and details</div><div><span>02</span><b>Search</b> · compare the web&apos;s best matches</div><div><span>03</span><b>Verify</b> · return product links with evidence</div></div></div></section>
+      <button className="mobile-toggle" onClick={() => setMobileResults((value) => !value)}>{mobileResults ? "Show video" : `Show ${products.length} findings`} <span>↗</span></button>
 
-      <footer className="shell footer"><span>SCENECART © 2026</span><span>THE SHOPPING LAYER FOR VIDEO</span><button onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}>BACK TO TOP ↑</button></footer>
+      <footer><div className="logo footer-logo"><span className="logo-mark">S</span>Spotted</div><p>Products, right on cue.</p><span>Built for the OpenAI hackathon · 2026</span></footer>
     </main>
+  );
+}
+
+function ProductCard({ product, index, active, onSelect, onTime }: { product: Product; index: number; active: boolean; onSelect: () => void; onTime: (time: number) => void }) {
+  return (
+    <article className={`product-card ${active ? "active" : ""}`} onMouseEnter={onSelect}>
+      <button className={`product-visual ${product.color}`} onClick={onSelect} aria-label={`Show ${product.brand} ${product.name} in video`}><span className={`product-shape shape-${product.id}`} /><small>{(index + 1).toString().padStart(2, "0")}</small></button>
+      <div className="product-copy">
+        <div className="product-meta"><span className={`match-label ${product.match}`}>{product.match}</span><span>{product.confidence}% confidence</span></div>
+        <p>{product.brand}</p><h3>{product.name}</h3><small>{product.description}</small>
+        <div className="timestamps"><span>Seen at</span>{product.timestamps.map((time) => <button key={time} onClick={() => onTime(time)}>{formatTime(time)}</button>)}</div>
+      </div>
+      <div className="product-shop"><strong>{product.price}</strong><small>at {product.retailer}</small><a href={product.retailerUrl} target="_blank" rel="noreferrer">View product <span>↗</span></a></div>
+    </article>
   );
 }
