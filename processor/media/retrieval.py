@@ -12,7 +12,7 @@ class YtDlpRetriever:
     def __init__(
         self,
         ytdlp_path: str = "yt-dlp",
-        timeout_seconds: int = 300,
+        timeout_seconds: int = 0,
         max_download_bytes: int = 2 * 1024**3,
     ) -> None:
         self.ytdlp_path = ytdlp_path
@@ -27,6 +27,14 @@ class YtDlpRetriever:
             "--no-playlist",
             "--no-progress",
             "--no-warnings",
+            "--socket-timeout",
+            "30",
+            "--retries",
+            "5",
+            "--fragment-retries",
+            "5",
+            "--concurrent-fragments",
+            "4",
             "--js-runtimes",
             "node",
             "--max-filesize",
@@ -47,7 +55,10 @@ class YtDlpRetriever:
                 check=True,
                 capture_output=True,
                 text=True,
-                timeout=self.timeout_seconds,
+                # A wall-clock timeout incorrectly rejects large or slow videos even
+                # while bytes are still arriving. yt-dlp's socket timeout and retry
+                # settings above handle actual stalled network requests instead.
+                timeout=self.timeout_seconds or None,
             )
         except FileNotFoundError as exc:
             raise RetrievalBlocked("yt-dlp is not installed on the processor.") from exc
@@ -104,7 +115,7 @@ class YtDlpRetriever:
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=min(self.timeout_seconds, 90),
+                timeout=min(self.timeout_seconds, 90) if self.timeout_seconds else 90,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass

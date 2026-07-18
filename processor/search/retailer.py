@@ -92,6 +92,7 @@ class RetailerSearchService:
             ),
             "tools": [{"type": "web_search", "search_context_size": "medium"}],
             "tool_choice": "required",
+            "reasoning": {"effort": "none"},
             "text": {
                 "format": {
                     "type": "json_schema",
@@ -122,6 +123,8 @@ class RetailerSearchService:
             # An exact SKU claim is never permitted without both brand and model evidence.
             match_kind = requested_kind if candidate.brand and candidate.model else MatchKind.SIMILAR
             confidence = max(0.0, min(1.0, float(raw.get("confidence", 0))))
+            if confidence < 0.5:
+                continue
             if match_kind is MatchKind.EXACT and confidence < 0.8:
                 match_kind = MatchKind.SIMILAR
             verified.append(
@@ -173,7 +176,11 @@ class RetailerSearchService:
         *,
         event_callback: EventCallback | None = None,
     ) -> list[ProductFinding]:
-        return [self.enrich(candidate, event_callback=event_callback) for candidate in candidates]
+        return [
+            self.enrich(candidate, event_callback=event_callback)
+            for candidate in candidates
+            if candidate.confidence >= 0.5
+        ]
 
 
 def enrich_candidates(

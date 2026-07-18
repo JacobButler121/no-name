@@ -137,6 +137,7 @@ class ProductAnalysisPipeline:
         client: OpenAIResponsesClient | None = None,
         batch_size: int = 10,
         detail: str = "high",
+        min_confidence: float = 0.5,
     ) -> None:
         if not 1 <= batch_size <= 20:
             raise ValueError("batch_size must be between 1 and 20")
@@ -145,6 +146,7 @@ class ProductAnalysisPipeline:
         self.client = client or OpenAIResponsesClient()
         self.batch_size = batch_size
         self.detail = detail
+        self.min_confidence = min_confidence
 
     def analyze(
         self,
@@ -168,7 +170,12 @@ class ProductAnalysisPipeline:
                     "endSec": frames[-1].timestamp_sec,
                 },
             )
-            batch_candidates = self._analyze_batch(frames, parsed.transcript, batch_index)
+            batch_candidates = self._analyze_batch(
+                frames,
+                parsed.transcript,
+                parsed.search_focus,
+                batch_index,
+            )
             candidates.extend(batch_candidates)
             for item in batch_candidates:
                 _emit(
@@ -186,13 +193,23 @@ class ProductAnalysisPipeline:
         return deduplicate_candidates(candidates)
 
     def _analyze_batch(
-        self, frames: Sequence[FrameSample], transcript: str | None, batch_index: int
+        self,
+        frames: Sequence[FrameSample],
+        transcript: str | None,
+        search_focus: str | None,
+        batch_index: int,
     ) -> list[ProductCandidate]:
         content: list[dict[str, Any]] = [
             {
                 "type": "input_text",
                 "text": (
                     "Analyze this ordered frame batch. The timestamp written before each image is authoritative.\n"
+                    + (
+                        f"SEARCH FOCUS: {search_focus}. Return only physical products that match this request. "
+                        "Treat plurals, synonyms, styles, and closely related subcategories as matches.\n"
+                        if search_focus
+                        else "SEARCH FOCUS: none. Return all defensible shoppable products.\n"
+                    )
                     + (f"Video transcript/captions (may span outside this batch):\n{transcript[:12000]}" if transcript else "No transcript is available.")
                 ),
             }
@@ -203,6 +220,7 @@ class ProductAnalysisPipeline:
         payload = {
             "instructions": SYSTEM_PROMPT,
             "input": [{"role": "user", "content": content}],
+            "reasoning": {"effort": "none"},
             "text": {
                 "format": {
                     "type": "json_schema",
@@ -221,6 +239,8 @@ class ProductAnalysisPipeline:
             if not isinstance(raw, Mapping):
                 raise AnalysisError("Detection candidate must be an object")
             candidate = ProductCandidate.from_dict(raw, fallback_id=f"batch-{batch_index}-candidate-{index}")
+            if candidate.confidence < self.min_confidence:
+                continue
             enriched: list[Appearance] = []
             for appearance in candidate.appearances:
                 closest = _closest_frame(frames, appearance.start_sec)

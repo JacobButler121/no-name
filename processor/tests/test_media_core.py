@@ -69,6 +69,9 @@ class RetrieverTests(unittest.TestCase):
             self.assertEqual(subtitles, [])
             self.assertEqual(run.call_count, 2)
             self.assertIn("--js-runtimes", run.call_args_list[0].args[0])
+            self.assertIn("--socket-timeout", run.call_args_list[0].args[0])
+            self.assertEqual(run.call_args_list[0].kwargs["timeout"], None)
+            self.assertEqual(run.call_args_list[1].kwargs["timeout"], 90)
 
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg required")
@@ -86,7 +89,7 @@ class MediaToolTests(unittest.TestCase):
                     "-f",
                     "lavfi",
                     "-i",
-                    "testsrc2=size=320x180:rate=12:duration=5",
+                    "testsrc2=size=320x180:rate=12:duration=11",
                     "-c:v",
                     "libx264",
                     "-pix_fmt",
@@ -98,7 +101,7 @@ class MediaToolTests(unittest.TestCase):
             )
             probe = MediaProbe(shutil.which("ffprobe") or "ffprobe")
             metadata = probe.inspect(video)
-            self.assertAlmostEqual(metadata["durationSec"], 5.0, delta=0.25)
+            self.assertAlmostEqual(metadata["durationSec"], 11.0, delta=0.25)
             self.assertEqual(metadata["width"], 320)
             extractor = FrameExtractor(
                 shutil.which("ffmpeg") or "ffmpeg",
@@ -110,13 +113,50 @@ class MediaToolTests(unittest.TestCase):
                 job_id="test-job",
                 metadata=metadata,
             )
-            self.assertGreaterEqual(len(frames), 2)
+            self.assertEqual([frame["timestampSec"] for frame in frames], [0.0, 5.0, 10.0])
             self.assertTrue(all(Path(frame["path"]).exists() for frame in frames))
             self.assertEqual(frames[0]["timestampSec"], 0.0)
             self.assertEqual(frames[0]["thumbnailUrl"], "/api/jobs/test-job/frames/frame-0001.jpg")
             manifest = json.loads(manifest_path.read_text())
             self.assertEqual(manifest["version"], 1)
+            self.assertEqual(manifest["intervalSec"], 5.0)
             self.assertEqual(manifest["frames"], frames)
+
+    def test_visually_identical_samples_are_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            video = root / "static.mp4"
+            subprocess.run(
+                [
+                    shutil.which("ffmpeg") or "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=blue:size=320x180:rate=12:duration=11",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    str(video),
+                ],
+                check=True,
+                timeout=30,
+            )
+            metadata = MediaProbe(shutil.which("ffprobe") or "ffprobe").inspect(video)
+            extractor = FrameExtractor(
+                shutil.which("ffmpeg") or "ffmpeg",
+                shutil.which("ffprobe") or "ffprobe",
+            )
+            frames, manifest_path = extractor.extract(
+                video, root, job_id="static-job", metadata=metadata
+            )
+            self.assertEqual([frame["timestampSec"] for frame in frames], [0.0])
+            manifest = json.loads(manifest_path.read_text())
+            self.assertEqual(manifest["sampledFrameCount"], 3)
+            self.assertEqual(manifest["skippedSimilarFrames"], 2)
 
 
 if __name__ == "__main__":

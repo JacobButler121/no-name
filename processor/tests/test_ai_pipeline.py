@@ -58,6 +58,7 @@ class ModelContractTests(unittest.TestCase):
             {
                 "version": 1,
                 "durationSec": 20.5,
+                "searchFocus": "Find all the lamps",
                 "frames": [
                     {
                         "id": "frame-0002",
@@ -74,6 +75,7 @@ class ModelContractTests(unittest.TestCase):
         )
         self.assertEqual([frame.timestamp_sec for frame in manifest.frames], [1.0, 4.0])
         self.assertEqual(manifest.duration_sec, 20.5)
+        self.assertEqual(manifest.search_focus, "Find all the lamps")
         self.assertEqual(manifest.frames[1].thumbnail_url, "/api/jobs/a/frames/frame-0002.jpg")
 
     def test_finding_serializes_frontend_contract(self) -> None:
@@ -119,8 +121,8 @@ class DedupeTests(unittest.TestCase):
 
 
 class LivePipelineTests(unittest.TestCase):
-    def test_model_defaults_to_terra_and_allows_env_override(self) -> None:
-        self.assertEqual(OpenAIResponsesClient(api_key="test").model, "gpt-5.6-terra")
+    def test_model_defaults_to_luna_and_allows_env_override(self) -> None:
+        self.assertEqual(OpenAIResponsesClient(api_key="test").model, "gpt-5.6-luna")
         with patch.dict("os.environ", {"SPOTTED_OPENAI_MODEL": "custom-vision-model"}):
             self.assertEqual(OpenAIResponsesClient(api_key="test").model, "custom-vision-model")
 
@@ -158,7 +160,10 @@ class LivePipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             image = Path(directory) / "frame.jpg"
             image.write_bytes(b"not-decoded-locally")
-            manifest = {"frames": [{"timestampSec": 2.0, "path": str(image), "thumbnailUrl": "/thumb.jpg"}]}
+            manifest = {
+                "searchFocus": "Find all the headphones",
+                "frames": [{"timestampSec": 2.0, "path": str(image), "thumbnailUrl": "/thumb.jpg"}],
+            }
             results = ProductAnalysisPipeline(client=fake).analyze(
                 manifest, event_callback=lambda event, payload: events.append(event)
             )
@@ -170,6 +175,43 @@ class LivePipelineTests(unittest.TestCase):
         self.assertIn("merging_duplicates", events)
         image_inputs = fake.payloads[0]["input"][0]["content"]
         self.assertTrue(any(item.get("type") == "input_image" for item in image_inputs))
+        self.assertEqual(fake.payloads[0]["reasoning"], {"effort": "none"})
+        prompt = image_inputs[0]["text"]
+        self.assertIn("Find all the headphones", prompt)
+        self.assertTrue(all(item.get("detail") == "high" for item in image_inputs if item.get("type") == "input_image"))
+
+    def test_pipeline_skips_candidates_below_fifty_percent(self) -> None:
+        response = {
+            "candidates": [
+                {
+                    "name": "Possible mug",
+                    "category": "mug",
+                    "brand": None,
+                    "model": None,
+                    "color": None,
+                    "material": None,
+                    "visibleText": [],
+                    "instanceKey": "mug",
+                    "confidence": 0.49,
+                    "appearances": [
+                        {
+                            "startSec": 5,
+                            "endSec": None,
+                            "evidence": "Partial object",
+                            "boundingBox": None,
+                        }
+                    ],
+                }
+            ]
+        }
+        fake = FakeClient([response])
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "frame.jpg"
+            image.write_bytes(b"not-decoded-locally")
+            results = ProductAnalysisPipeline(client=fake).analyze(
+                {"frames": [{"timestampSec": 5, "path": str(image)}]}
+            )
+        self.assertEqual(results, [])
 
 
 class RetailSearchTests(unittest.TestCase):

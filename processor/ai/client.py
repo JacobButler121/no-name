@@ -21,7 +21,7 @@ class OpenAIResponsesClient:
         timeout: float = 120.0,
     ) -> None:
         self.api_key = api_key if api_key is not None else os.getenv("OPENAI_API_KEY", "")
-        self.model = model or os.getenv("SPOTTED_OPENAI_MODEL", "gpt-5.6-terra")
+        self.model = model or os.getenv("SPOTTED_OPENAI_MODEL", "gpt-5.6-luna")
         self.base_url = (base_url or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")).rstrip("/")
         self.timeout = timeout
 

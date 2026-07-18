@@ -110,6 +110,7 @@ async function responseJson(response: Response): Promise<JobResponse> {
 
 export default function Home() {
   const [url, setUrl] = useState("");
+  const [focus, setFocus] = useState("");
   const [jobId, setJobId] = useState<string | null>(null);
   const [platform, setPlatform] = useState("video");
   const [status, setStatus] = useState<"idle" | "starting" | "running" | "complete" | "blocked" | "error">("idle");
@@ -228,7 +229,7 @@ export default function Home() {
       const response = await fetch("/api/jobs", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ url: videoUrl }),
+        body: JSON.stringify({ url: videoUrl, focus: focus.trim() || undefined }),
       });
       const data = await responseJson(response);
       if (!response.ok) throw new Error(responseMessage(data, "The video processor is unavailable."));
@@ -244,6 +245,7 @@ export default function Home() {
     if (!file) return;
     const form = new FormData();
     form.append("file", file);
+    if (focus.trim()) form.append("focus", focus.trim());
     setStatus("starting");
     setEventType("retrieving_video");
     setEventHistory(["retrieving_video"]);
@@ -289,7 +291,11 @@ export default function Home() {
     setCurrentTime(appearance.startSec);
     setMobileResults(false);
     if (videoRef.current) {
-      videoRef.current.currentTime = appearance.startSec;
+      const duration = videoRef.current.duration;
+      const target = Number.isFinite(duration)
+        ? Math.min(appearance.startSec, Math.max(0, duration - 0.05))
+        : appearance.startSec;
+      videoRef.current.currentTime = target;
       void videoRef.current.play().catch(() => undefined);
     }
   }
@@ -316,6 +322,19 @@ export default function Home() {
           <span className="composer-icon">↗</span>
           <input id="composer" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="YouTube, TikTok, or Instagram URL" inputMode="url" disabled={status === "starting"} />
           <button type="submit" disabled={!url.trim() || status === "starting"}>{status === "starting" ? "Starting" : "Find products"}<span>→</span></button>
+        </div>
+        <div className="focus-row">
+          <span className="focus-icon">✦</span>
+          <label htmlFor="search-focus">What should Spotted look for?</label>
+          <input
+            id="search-focus"
+            value={focus}
+            onChange={(event) => setFocus(event.target.value)}
+            placeholder="Optional — e.g. Find all the lamps in this video"
+            disabled={status === "starting"}
+            maxLength={500}
+          />
+          <span className="focus-mode">{focus.trim() ? "Focused scan" : "Find everything"}</span>
         </div>
         <div className="composer-meta">
           <div className="platforms"><span>YouTube</span><i /><span>TikTok</span><i /><span>Instagram</span></div>
@@ -344,7 +363,7 @@ export default function Home() {
           <div className="video-column">
             <div className="panel-heading">
               <div><span className="step-number">01</span><div><strong>Video</strong><small>{jobId ? `${platform} · Job ${jobId.slice(0, 8)}` : "Creating secure session"}</small></div></div>
-              <span className="source-badge">Live analysis</span>
+              <span className="source-badge">{focus.trim() ? "Focused analysis" : "Live analysis"}</span>
             </div>
             <div className="video-stage real-video-stage">
               {jobId && <video ref={videoRef} controls playsInline preload="metadata" src={`/api/jobs/${encodeURIComponent(jobId)}/media`} onCanPlay={() => setVideoReady(true)} onTimeUpdate={(event) => { setCurrentTime(event.currentTarget.currentTime); if (activeAppearance && Math.abs(event.currentTarget.currentTime - activeAppearance.startSec) > 4) setActiveAppearance(null); }} />}
@@ -353,7 +372,7 @@ export default function Home() {
             </div>
             <div className="moments">
               <div><span className="moment-count">{products.reduce((sum, product) => sum + product.appearances.length, 0).toString().padStart(2, "0")}</span><span>Product moments<br />across {products.length || "—"} unique finds</span></div>
-              <div className="moment-list">{products.flatMap((product) => product.appearances.map((appearance, index) => <button key={`${product.id}-${appearance.startSec}-${index}`} className={activeId === product.id && currentTime === appearance.startSec ? "active" : ""} onClick={() => seek(product, appearance)}><span>{formatTime(appearance.startSec)}</span>{product.brand || product.name}</button>))}</div>
+              <div className="moment-list">{products.flatMap((product) => product.appearances.map((appearance, index) => <button key={`${product.id}-${appearance.startSec}-${index}`} className={activeId === product.id && Math.abs(currentTime - appearance.startSec) < 0.75 ? "active" : ""} onClick={() => seek(product, appearance)}><span>{formatTime(appearance.startSec)}</span>{product.brand || product.name}</button>))}</div>
             </div>
           </div>
 

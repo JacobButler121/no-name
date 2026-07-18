@@ -109,6 +109,7 @@ class FrameManifest:
     frames: tuple[FrameSample, ...]
     transcript: str | None = None
     source_url: str | None = None
+    search_focus: str | None = None
     duration_sec: float | None = None
 
     def __post_init__(self) -> None:
@@ -121,17 +122,20 @@ class FrameManifest:
             raw_frames = _value(data, "frames", "samples", default=[])
             transcript = _value(data, "transcript", "captions")
             source_url = _value(data, "sourceUrl", "source_url", "url")
+            search_focus = _value(data, "searchFocus", "search_focus", "focus")
             duration = _value(data, "durationSec", "duration_sec", "duration")
         else:
             raw_frames = data
             transcript = None
             source_url = None
+            search_focus = None
             duration = None
         frames = tuple(sorted((FrameSample.from_dict(item) for item in raw_frames), key=lambda item: item.timestamp_sec))
         return cls(
             frames=frames,
             transcript=str(transcript) if transcript else None,
             source_url=str(source_url) if source_url else None,
+            search_focus=str(search_focus).strip() if search_focus else None,
             duration_sec=float(duration) if duration is not None else None,
         )
 

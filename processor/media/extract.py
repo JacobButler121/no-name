@@ -1,15 +1,11 @@
 from __future__ import annotations
 
 import json
-import re
 import subprocess
 from pathlib import Path
 from typing import Any
 
 from .probe import MediaProbe
-
-
-_TIMESTAMP_PATTERN = re.compile(r"frame_(\d+)\.jpg$")
 
 
 class ExtractionError(RuntimeError):
@@ -22,20 +18,21 @@ class FrameExtractor:
         ffmpeg_path: str = "ffmpeg",
         ffprobe_path: str = "ffprobe",
         timeout_seconds: int = 300,
-        scene_threshold: float = 0.32,
+        interval_seconds: float = 5.0,
+        similarity_threshold: float = 0.92,
+        max_dimension: int = 1600,
     ) -> None:
         self.ffmpeg_path = ffmpeg_path
         self.timeout_seconds = timeout_seconds
-        self.scene_threshold = scene_threshold
+        self.interval_seconds = interval_seconds
+        self.similarity_threshold = similarity_threshold
+        self.max_dimension = max_dimension
         self.probe = MediaProbe(ffprobe_path, timeout_seconds=min(timeout_seconds, 60))
 
     @staticmethod
     def interval_for(duration_seconds: float) -> float:
-        if duration_seconds <= 180:
-            return 2.0
-        if duration_seconds <= 1200:
-            return 5.0
-        return 10.0
+        """Spotted deliberately samples on a predictable five-second cadence."""
+        return 5.0
 
     def extract(
         self,
@@ -47,17 +44,13 @@ class FrameExtractor:
     ) -> tuple[list[dict[str, Any]], Path]:
         metadata = metadata or self.probe.inspect(media_path)
         duration = float(metadata.get("durationSec") or 0)
-        interval = self.interval_for(duration)
+        interval = self.interval_seconds
         frames_dir = job_directory / "frames"
         frames_dir.mkdir(parents=True, exist_ok=True)
-        output_pattern = frames_dir / "frame_%012d.jpg"
-        selection = (
-            f"isnan(prev_selected_t)+gt(scene,{self.scene_threshold})+"
-            f"gte(t-prev_selected_t,{interval})"
-        )
+        output_pattern = frames_dir / "sample-%08d.jpg"
         video_filter = (
-            f"select='{selection}',"
-            "scale='min(1280,iw)':-2"
+            f"fps=fps=1/{interval}:start_time=0:round=down:eof_action=pass,"
+            f"scale='min({self.max_dimension},iw)':-2"
         )
         command = [
             self.ffmpeg_path,
@@ -68,10 +61,6 @@ class FrameExtractor:
             str(media_path),
             "-vf",
             video_filter,
-            "-fps_mode",
-            "vfr",
-            "-frame_pts",
-            "1",
             "-q:v",
             "3",
             str(output_pattern),
@@ -92,12 +81,18 @@ class FrameExtractor:
             detail = (exc.stderr or "Frame extraction failed.").strip()
             raise ExtractionError(detail[-1000:]) from exc
 
-        paths = sorted(frames_dir.glob("frame_*.jpg"))
+        sampled_paths = sorted(frames_dir.glob("sample-*.jpg"))
+        retained_paths = self._remove_similar_frames(sampled_paths)
         frames: list[dict[str, Any]] = []
-        time_base = self._video_time_base(media_path)
-        for index, path in enumerate(paths, start=1):
-            timestamp = self._timestamp_from_name(path, time_base, fallback=(index - 1) * interval)
-            frame_id = f"frame-{index:04d}"
+        retained_set = set(retained_paths)
+        stable_index = 0
+        for sample_index, path in enumerate(sampled_paths):
+            if path not in retained_set:
+                path.unlink(missing_ok=True)
+                continue
+            stable_index += 1
+            timestamp = sample_index * interval
+            frame_id = f"frame-{stable_index:04d}"
             stable_path = frames_dir / f"{frame_id}.jpg"
             path.replace(stable_path)
             frames.append(
@@ -108,7 +103,7 @@ class FrameExtractor:
                     "thumbnailUrl": f"/api/jobs/{job_id}/frames/{stable_path.name}",
                     "width": int(metadata.get("width") or 0),
                     "height": int(metadata.get("height") or 0),
-                    "source": "scene_or_interval",
+                    "source": "five_second_unique",
                 }
             )
         if not frames:
@@ -117,44 +112,74 @@ class FrameExtractor:
             "version": 1,
             "durationSec": duration,
             "intervalSec": interval,
+            "sampledFrameCount": len(sampled_paths),
+            "skippedSimilarFrames": len(sampled_paths) - len(frames),
             "frames": frames,
         }
         manifest_path = frames_dir / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         return frames, manifest_path
 
-    def _video_time_base(self, media_path: Path) -> float:
+    def _remove_similar_frames(self, paths: list[Path]) -> list[Path]:
+        """Remove near-identical samples before they can consume vision tokens.
+
+        A tiny 16x16 grayscale fingerprint is generated locally with ffmpeg. A
+        sample is retained only when it differs meaningfully from every prior
+        retained sample, which also catches a scene that returns later.
+        """
+        if len(paths) < 2:
+            return paths
+        hashes = self._perceptual_hashes(paths)
+        if len(hashes) != len(paths):
+            return paths
+        retained: list[Path] = []
+        retained_hashes: list[int] = []
+        bit_count = 16 * 16
+        for path, fingerprint in zip(paths, hashes, strict=True):
+            maximum_similarity = max(
+                (1.0 - ((fingerprint ^ prior).bit_count() / bit_count) for prior in retained_hashes),
+                default=0.0,
+            )
+            if maximum_similarity >= self.similarity_threshold:
+                continue
+            retained.append(path)
+            retained_hashes.append(fingerprint)
+        return retained or paths[:1]
+
+    def _perceptual_hashes(self, paths: list[Path]) -> list[int]:
+        pattern = paths[0].parent / "sample-%08d.jpg"
         command = [
-            self.probe.ffprobe_path,
-            "-v",
+            self.ffmpeg_path,
+            "-hide_banner",
+            "-loglevel",
             "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=time_base",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(media_path),
+            "-i",
+            str(pattern),
+            "-vf",
+            "scale=16:16,format=gray",
+            "-f",
+            "rawvideo",
+            "pipe:1",
         ]
         try:
             completed = subprocess.run(
                 command,
                 check=True,
                 capture_output=True,
-                text=True,
                 timeout=30,
             )
-            numerator, denominator = completed.stdout.strip().split("/", 1)
-            return float(numerator) / float(denominator)
-        except (OSError, subprocess.SubprocessError, ValueError, ZeroDivisionError):
-            return 1.0
-
-    @staticmethod
-    def _timestamp_from_name(path: Path, time_base: float, fallback: float) -> float:
-        match = _TIMESTAMP_PATTERN.search(path.name)
-        if not match:
-            return fallback
-        try:
-            return float(match.group(1)) * time_base
-        except ValueError:
-            return fallback
+        except (OSError, subprocess.SubprocessError):
+            return []
+        frame_bytes = 16 * 16
+        raw = completed.stdout
+        if not isinstance(raw, bytes) or len(raw) < frame_bytes:
+            return []
+        hashes: list[int] = []
+        for offset in range(0, len(raw) - frame_bytes + 1, frame_bytes):
+            frame = raw[offset : offset + frame_bytes]
+            average = sum(frame) / frame_bytes
+            fingerprint = 0
+            for value in frame:
+                fingerprint = (fingerprint << 1) | int(value >= average)
+            hashes.append(fingerprint)
+        return hashes[: len(paths)]

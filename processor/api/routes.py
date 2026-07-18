@@ -8,9 +8,9 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import AsyncIterator
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl
 
 from processor.config import Settings
 from processor.media import FrameExtractor, MediaProbe, RetrievalBlocked, YtDlpRetriever, classify_url
@@ -21,6 +21,7 @@ from processor.storage import JobStore
 
 class CreateJobRequest(BaseModel):
     url: HttpUrl
+    focus: str | None = Field(default=None, max_length=500)
 
 
 _RANGE_PATTERN = re.compile(r"bytes=(\d*)-(\d*)$")
@@ -30,7 +31,7 @@ def create_router(store: JobStore, settings: Settings) -> APIRouter:
     router = APIRouter(prefix="/api/jobs", tags=["jobs"])
     workers = ThreadPoolExecutor(max_workers=3, thread_name_prefix="spotted-media")
 
-    def process_url(job_id: str, url: str) -> None:
+    def process_url(job_id: str, url: str, focus: str | None) -> None:
         retriever = YtDlpRetriever(
             settings.ytdlp_path,
             settings.download_timeout_seconds,
@@ -40,7 +41,7 @@ def create_router(store: JobStore, settings: Settings) -> APIRouter:
             store.emit(job_id, "retrieving_video", message="Retrieving public video")
             job = store.get(job_id)
             source_path, subtitle_paths = retriever.retrieve(url, job.directory)
-            _process_media(job_id, source_path, subtitle_paths)
+            _process_media(job_id, source_path, subtitle_paths, focus)
         except RetrievalBlocked as exc:
             error = {
                 "code": "retrieval_blocked",
@@ -52,7 +53,12 @@ def create_router(store: JobStore, settings: Settings) -> APIRouter:
         except Exception as exc:  # background workers must always terminate the job
             _fail_job(store, job_id, exc)
 
-    def _process_media(job_id: str, source_path: Path, subtitle_paths: list[Path]) -> None:
+    def _process_media(
+        job_id: str,
+        source_path: Path,
+        subtitle_paths: list[Path],
+        focus: str | None,
+    ) -> None:
         try:
             probe = MediaProbe(settings.ffprobe_path, settings.command_timeout_seconds)
             metadata = probe.inspect(source_path)
@@ -87,6 +93,7 @@ def create_router(store: JobStore, settings: Settings) -> APIRouter:
                 manifest_path,
                 source_url=store.get(job_id).source_url,
                 subtitle_paths=subtitle_paths,
+                search_focus=focus,
             )
             store.update(job_id, frames=frames)
             store.emit(
@@ -119,12 +126,13 @@ def create_router(store: JobStore, settings: Settings) -> APIRouter:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         job = store.create(source_url=url, platform=platform)
-        workers.submit(process_url, job.id, url)
+        workers.submit(process_url, job.id, url, _clean_focus(payload.focus))
         return job.snapshot()
 
     @router.post("/upload")
     async def upload_job(
         file: UploadFile = File(...),
+        focus: str | None = Form(default=None, max_length=500),
     ) -> dict:
         if file.content_type and not (
             file.content_type.startswith("video/")
@@ -144,7 +152,13 @@ def create_router(store: JobStore, settings: Settings) -> APIRouter:
         finally:
             await file.close()
         store.emit(job.id, "retrieving_video", message="Upload received")
-        workers.submit(_process_media, job.id, destination.resolve(), [])
+        workers.submit(
+            _process_media,
+            job.id,
+            destination.resolve(),
+            [],
+            _clean_focus(focus),
+        )
         return store.get(job.id).snapshot()
 
     @router.get("/{job_id}")
@@ -272,14 +286,24 @@ def _add_manifest_context(
     *,
     source_url: str | None,
     subtitle_paths: list[Path],
+    search_focus: str | None,
 ) -> None:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if source_url:
         manifest["sourceUrl"] = source_url
+    if search_focus:
+        manifest["searchFocus"] = search_focus
     transcript = _read_vtt_transcript(subtitle_paths)
     if transcript:
         manifest["transcript"] = transcript
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+
+def _clean_focus(value: str | None) -> str | None:
+    if not value:
+        return None
+    cleaned = " ".join(value.split())
+    return cleaned or None
 
 
 def _read_vtt_transcript(paths: list[Path], *, limit: int = 50_000) -> str:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import tempfile
@@ -70,13 +71,18 @@ class MediaApiTests(unittest.TestCase):
                 response = self.client.post(
                     "/api/jobs/upload",
                     files={"file": ("fixture.mp4", source, "video/mp4")},
+                    data={"focus": "  Find all   the lamps  "},
                 )
             self.assertEqual(response.status_code, 200)
             job_id = response.json()["jobId"]
             snapshot = self._wait_for_terminal(job_id)
 
         self.assertEqual(snapshot["status"], "completed")
-        self.assertGreaterEqual(len(snapshot["frames"]), 2)
+        self.assertEqual(len(snapshot["frames"]), 1)
+        manifest = json.loads(
+            (self.store.get(job_id).directory / "frames" / "manifest.json").read_text()
+        )
+        self.assertEqual(manifest["searchFocus"], "Find all the lamps")
         thumbnail = snapshot["frames"][0]["thumbnailUrl"]
         self.assertEqual(self.client.get(thumbnail).status_code, 200)
 

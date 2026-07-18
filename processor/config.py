@@ -64,7 +64,7 @@ class Settings:
     )
     download_timeout_seconds: int = field(
         default_factory=lambda: int(
-            os.environ.get("SPOTTED_DOWNLOAD_TIMEOUT_SECONDS", "300")
+            os.environ.get("SPOTTED_DOWNLOAD_TIMEOUT_SECONDS", "0")
         )
     )
     command_timeout_seconds: int = field(
