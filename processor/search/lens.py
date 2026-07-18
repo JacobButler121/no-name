@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 import urllib.error
 import urllib.parse
@@ -37,10 +38,11 @@ class LensCandidate:
 class GoogleLensSearchClient:
     """Optional Google Lens candidate lookup backed by SerpApi.
 
-    SerpApi requires a publicly reachable image URL. Spotted therefore exposes
-    only the selected temporary crop through the existing expiring job route.
-    When either credential or public base URL is absent, the client is disabled
-    and the OpenAI-only search path continues unchanged.
+    SerpApi requires a publicly reachable image URL. The preferred path uploads
+    one selected crop to Spotted's short-lived Sites relay, searches it, and
+    deletes it in a finally block. A tunneled processor origin remains available
+    as a legacy fallback. When neither transport is configured, the OpenAI-only
+    search path continues unchanged.
     """
 
     def __init__(
@@ -48,6 +50,8 @@ class GoogleLensSearchClient:
         *,
         api_key: str | None = None,
         public_base_url: str | None = None,
+        relay_url: str | None = None,
+        relay_token: str | None = None,
         country: str | None = None,
         language: str | None = None,
         timeout: float = 25.0,
@@ -59,22 +63,47 @@ class GoogleLensSearchClient:
             if public_base_url is not None
             else os.getenv("SPOTTED_PUBLIC_BASE_URL", "")
         ).rstrip("/")
+        self.relay_url = (
+            relay_url
+            if relay_url is not None
+            else os.getenv("SPOTTED_IMAGE_RELAY_URL", "")
+        ).rstrip("/")
+        self.relay_token = (
+            relay_token
+            if relay_token is not None
+            else os.getenv("SPOTTED_RELAY_TOKEN", "")
+        )
         self.country = country or os.getenv("SPOTTED_LENS_COUNTRY", "us")
         self.language = language or os.getenv("SPOTTED_LENS_LANGUAGE", "en")
         self.timeout = timeout
         self.opener = opener
 
     @property
-    def enabled(self) -> bool:
+    def public_base_enabled(self) -> bool:
         parsed = urllib.parse.urlparse(self.public_base_url)
         return bool(
-            self.api_key.strip()
-            and parsed.scheme == "https"
+            parsed.scheme == "https"
             and parsed.netloc
         )
 
+    @property
+    def relay_enabled(self) -> bool:
+        parsed = urllib.parse.urlparse(self.relay_url)
+        return bool(
+            parsed.scheme == "https"
+            and parsed.netloc
+            and self.relay_token.strip()
+        )
+
+    @property
+    def enabled(self) -> bool:
+        return bool(
+            self.api_key.strip()
+            and (self.relay_enabled or self.public_base_enabled)
+        )
+
     def public_crop_url(self, thumbnail_url: str | None, crop_name: str) -> str | None:
-        if not self.enabled or not thumbnail_url:
+        if not self.public_base_enabled or not thumbnail_url:
             return None
         match = urllib.parse.urlparse(thumbnail_url).path.split("/")
         try:
@@ -91,7 +120,7 @@ class GoogleLensSearchClient:
         )
 
     def public_frame_url(self, thumbnail_url: str | None) -> str | None:
-        if not self.enabled or not thumbnail_url:
+        if not self.public_base_enabled or not thumbnail_url:
             return None
         path = urllib.parse.urlparse(thumbnail_url).path
         if not path.startswith("/api/jobs/") or "/frames/" not in path:
@@ -175,3 +204,67 @@ class GoogleLensSearchClient:
             if len(candidates) >= limit:
                 break
         return candidates
+
+    def search_crop(
+        self,
+        image_path: str | os.PathLike[str],
+        *,
+        query: str | None = None,
+        limit: int = 8,
+    ) -> list[LensCandidate]:
+        """Search one local crop through the relay and always request deletion."""
+        if not self.enabled or not self.relay_enabled:
+            return []
+        try:
+            with open(image_path, "rb") as image_file:
+                image_bytes = image_file.read(5 * 1024 * 1024 + 1)
+        except OSError:
+            return []
+        if not image_bytes or len(image_bytes) > 5 * 1024 * 1024:
+            return []
+
+        content_type = mimetypes.guess_type(os.fspath(image_path))[0] or "image/jpeg"
+        upload = urllib.request.Request(
+            self.relay_url,
+            data=image_bytes,
+            method="POST",
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {self.relay_token}",
+                "Content-Type": content_type,
+                "User-Agent": "Spotted-Hackathon/1.0",
+            },
+        )
+        try:
+            with self.opener(upload, timeout=self.timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except (
+            OSError,
+            TimeoutError,
+            urllib.error.URLError,
+            json.JSONDecodeError,
+        ):
+            return []
+        if not isinstance(payload, Mapping):
+            return []
+        image_url = str(payload.get("url") or "").strip()
+        delete_url = str(payload.get("deleteUrl") or image_url).strip()
+        if not image_url.startswith("https://"):
+            return []
+        try:
+            return self.search(image_url, query=query, limit=limit)
+        finally:
+            if delete_url.startswith("https://"):
+                deletion = urllib.request.Request(
+                    delete_url,
+                    method="DELETE",
+                    headers={
+                        "Authorization": f"Bearer {self.relay_token}",
+                        "User-Agent": "Spotted-Hackathon/1.0",
+                    },
+                )
+                try:
+                    with self.opener(deletion, timeout=min(self.timeout, 10.0)):
+                        pass
+                except (OSError, TimeoutError, urllib.error.URLError):
+                    pass

@@ -30,16 +30,18 @@ The default model split keeps routine frame scanning on `gpt-5.6-luna` and
 uses `gpt-5.6-terra` only for one image-first search and verification pass per
 unique tracked object. Both values can be overridden in `.env.local`.
 
-For true reverse-image candidate discovery, add a SerpApi key and the public
-HTTPS origin of the secure demo tunnel:
+For true reverse-image candidate discovery, add a SerpApi key and configure the
+short-lived crop relay deployed with the Sites frontend:
 
 ```text
 SERPAPI_API_KEY=your-serpapi-key
-SPOTTED_PUBLIC_BASE_URL=https://your-secure-demo-origin.example
+SPOTTED_IMAGE_RELAY_URL=https://your-spotted-site.example/api/lens-crops
+SPOTTED_RELAY_TOKEN=use-the-same-secret-configured-in-sites
 ```
 
-Spotted sends one tight, temporary crop per unique product to Google Lens. Lens
-only proposes candidates; OpenAI compares the video crops with retailer images,
+Spotted sends one tight crop per unique product to the relay, runs Google Lens
+against its temporary HTTPS URL, and deletes the crop as soon as Lens returns.
+Lens only proposes candidates; OpenAI compares the video crops with retailer images,
 rejects visual contradictions, and decides whether a result is exact or similar.
 Without these optional values, the OpenAI image-informed web-search path remains
 fully functional.

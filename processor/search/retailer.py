@@ -314,16 +314,6 @@ class RetailerSearchService:
         )
         if not crop_path:
             return []
-        if crop_path.parent.name == "crops":
-            public_url = self.lens_client.public_crop_url(
-                appearance.thumbnail_url, crop_path.name
-            )
-        else:
-            public_url = self.lens_client.public_frame_url(
-                appearance.thumbnail_url
-            )
-        if not public_url:
-            return []
         query = " ".join(
             value
             for value in (
@@ -335,6 +325,26 @@ class RetailerSearchService:
             )
             if value
         )
+        search_crop = getattr(self.lens_client, "search_crop", None)
+        if callable(search_crop):
+            relay_results = search_crop(
+                crop_path,
+                query=query,
+                limit=self.candidate_limit,
+            )
+            if relay_results or getattr(self.lens_client, "relay_enabled", False):
+                return relay_results
+
+        if crop_path.parent.name == "crops":
+            public_url = self.lens_client.public_crop_url(
+                appearance.thumbnail_url, crop_path.name
+            )
+        else:
+            public_url = self.lens_client.public_frame_url(
+                appearance.thumbnail_url
+            )
+        if not public_url:
+            return []
         return self.lens_client.search(
             public_url,
             query=query,

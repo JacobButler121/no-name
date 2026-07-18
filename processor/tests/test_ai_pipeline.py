@@ -97,12 +97,26 @@ class FakeHTTPResponse:
 
 
 class LensClientTests(unittest.TestCase):
-    def test_lens_is_optional_and_requires_a_public_https_origin(self) -> None:
+    def test_lens_is_optional_and_requires_a_secure_transport(self) -> None:
         self.assertFalse(
             GoogleLensSearchClient(api_key="", public_base_url="https://spotted.example").enabled
         )
         self.assertFalse(
             GoogleLensSearchClient(api_key="key", public_base_url="http://localhost:3000").enabled
+        )
+        self.assertFalse(
+            GoogleLensSearchClient(
+                api_key="key",
+                relay_url="https://spotted.example/api/lens-crops",
+                relay_token="",
+            ).enabled
+        )
+        self.assertTrue(
+            GoogleLensSearchClient(
+                api_key="key",
+                relay_url="https://spotted.example/api/lens-crops",
+                relay_token="relay-secret",
+            ).enabled
         )
 
     def test_lens_parses_and_deduplicates_visual_matches(self) -> None:
@@ -147,6 +161,49 @@ class LensClientTests(unittest.TestCase):
         self.assertEqual(query["engine"], ["google_lens"])
         self.assertEqual(query["type"], ["visual_matches"])
         self.assertEqual(query["q"], ["green ceramic lamp"])
+
+    def test_relay_uploads_searches_and_deletes_one_crop(self) -> None:
+        requests = []
+
+        def opener(request, **_kwargs):
+            requests.append(request)
+            if request.get_method() == "POST":
+                return FakeHTTPResponse(
+                    {
+                        "url": "https://spotted.example/api/lens-crops/crop.jpg",
+                        "deleteUrl": "https://spotted.example/api/lens-crops/crop.jpg",
+                    }
+                )
+            if request.get_method() == "DELETE":
+                return FakeHTTPResponse({})
+            return FakeHTTPResponse(
+                {
+                    "visual_matches": [
+                        {
+                            "title": "Green ceramic vessel table lamp",
+                            "link": "https://lighting.example/green-lamp",
+                            "source": "Lighting Store",
+                        }
+                    ]
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            crop = Path(directory) / "lamp.jpg"
+            crop.write_bytes(b"jpeg-crop")
+            client = GoogleLensSearchClient(
+                api_key="serp-key",
+                relay_url="https://spotted.example/api/lens-crops",
+                relay_token="relay-secret",
+                opener=opener,
+            )
+            result = client.search_crop(crop, query="green ceramic lamp")
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual([request.get_method() for request in requests], ["POST", "GET", "DELETE"])
+        self.assertEqual(requests[0].data, b"jpeg-crop")
+        self.assertEqual(requests[0].get_header("Authorization"), "Bearer relay-secret")
+        self.assertEqual(requests[2].get_header("Authorization"), "Bearer relay-secret")
 
 
 class ModelContractTests(unittest.TestCase):
