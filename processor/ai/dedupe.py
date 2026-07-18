@@ -15,6 +15,7 @@ _CATEGORY_FAMILIES = {
     "shoes": {"shoe", "shoes", "sneaker", "sneakers", "boot", "boots"},
     "seating": {"chair", "chairs", "stool", "sofa", "couch", "bench"},
 }
+_GENERIC_MATERIALS = {"material", "mixed", "metal", "wood", "plastic"}
 _BATCH_PATTERN = re.compile(r"batch-(\d+)-candidate-")
 
 
@@ -42,8 +43,34 @@ def _batch_id(candidate: ProductCandidate) -> str | None:
     return match.group(1) if match else None
 
 
+def _attribute_tokens(value: str | None) -> set[str]:
+    return {
+        token for token in _normalized(value).split() if token not in _NOISE
+    }
+
+
+def _conflicts(
+    left: str | None, right: str | None, *, material: bool = False
+) -> bool:
+    left_tokens = _attribute_tokens(left)
+    right_tokens = _attribute_tokens(right)
+    if material:
+        left_tokens -= _GENERIC_MATERIALS
+        right_tokens -= _GENERIC_MATERIALS
+    return bool(
+        left_tokens and right_tokens and left_tokens.isdisjoint(right_tokens)
+    )
+
+
 def _similarity(left: ProductCandidate, right: ProductCandidate) -> float:
     if _category_family(left.category) != _category_family(right.category):
+        return 0.0
+    # Shared category words must not merge visibly different objects. Missing
+    # attributes remain unknown, while explicit color/material conflicts split
+    # tracks before retailer search.
+    if _conflicts(left.color, right.color) or _conflicts(
+        left.material, right.material, material=True
+    ):
         return 0.0
     left_brand, right_brand = _normalized(left.brand), _normalized(right.brand)
     left_model, right_model = _normalized(left.model), _normalized(right.model)
@@ -53,6 +80,10 @@ def _similarity(left: ProductCandidate, right: ProductCandidate) -> float:
         return 0.0
     if left_brand and right_brand and left_model and right_model:
         return 1.0
+    left_text = _tokens(*left.visible_text)
+    right_text = _tokens(*right.visible_text)
+    if left_text and right_text and left_text & right_text:
+        return 0.98
     if left.instance_key and right.instance_key:
         if _normalized(left.instance_key) == _normalized(right.instance_key):
             return 1.0
@@ -71,7 +102,16 @@ def _similarity(left: ProductCandidate, right: ProductCandidate) -> float:
     jaccard = len(left_tokens & right_tokens) / len(union) if union else 0.0
     name_ratio = SequenceMatcher(None, _normalized(left.name), _normalized(right.name)).ratio()
     identity_bonus = 0.12 if left_brand and left_brand == right_brand else 0.0
-    return min(1.0, 0.55 * jaccard + 0.45 * name_ratio + identity_bonus)
+    color_bonus = 0.06 if left.color and right.color else 0.0
+    material_bonus = 0.04 if left.material and right.material else 0.0
+    return min(
+        1.0,
+        0.6 * jaccard
+        + 0.4 * name_ratio
+        + identity_bonus
+        + color_bonus
+        + material_bonus,
+    )
 
 
 def _merge_appearances(items: Iterable[Appearance], tolerance_sec: float = 0.75) -> list[Appearance]:
@@ -105,6 +145,11 @@ def _stable_id(candidate: ProductCandidate) -> str:
 def _merge_into(target: ProductCandidate, source: ProductCandidate) -> None:
     if source.confidence > target.confidence:
         target.name = source.name
+        target.color = source.color or target.color
+        target.material = source.material or target.material
+        target.visual_description = (
+            source.visual_description or target.visual_description
+        )
     target.confidence = max(target.confidence, source.confidence)
     target.brand = target.brand or source.brand
     target.model = target.model or source.model
@@ -117,7 +162,7 @@ def _merge_into(target: ProductCandidate, source: ProductCandidate) -> None:
 
 
 def deduplicate_candidates(
-    candidates: Iterable[ProductCandidate], *, similarity_threshold: float = 0.72
+    candidates: Iterable[ProductCandidate], *, similarity_threshold: float = 0.84
 ) -> list[ProductCandidate]:
     """Merge repeat sightings while retaining genuinely distinct instances.
 

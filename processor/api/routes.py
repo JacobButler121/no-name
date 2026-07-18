@@ -77,6 +77,8 @@ def create_router(store: JobStore, settings: Settings) -> APIRouter:
                 "extracting_frames",
                 message="Extracting scenes and interval frames",
                 durationSec=metadata.get("durationSec"),
+                width=metadata.get("width"),
+                height=metadata.get("height"),
             )
             extractor = FrameExtractor(
                 settings.ffmpeg_path,

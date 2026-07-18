@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import base64
+import json
 import mimetypes
 import os
 import re
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 from processor.ai.client import OpenAIResponsesClient
 from processor.models import (
     AnalysisError,
+    Appearance,
     MatchKind,
     ProductCandidate,
     ProductFinding,
@@ -30,7 +33,7 @@ SEARCH_SCHEMA: dict[str, Any] = {
     "properties": {
         "matches": {
             "type": "array",
-            "maxItems": 2,
+            "maxItems": 8,
             "items": {
                 "type": "object",
                 "properties": {
@@ -56,16 +59,35 @@ VISUAL_MATCH_SCHEMA: dict[str, Any] = {
     "properties": {
         "comparisons": {
             "type": "array",
-            "maxItems": 2,
+            "maxItems": 8,
             "items": {
                 "type": "object",
                 "properties": {
-                    "index": {"type": "integer", "minimum": 0, "maximum": 1},
+                    "index": {"type": "integer", "minimum": 0, "maximum": 7},
                     "verdict": {"type": "string", "enum": ["exact", "similar", "reject"]},
                     "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    "categoryMatch": {"type": "string", "enum": ["match", "mismatch", "unknown"]},
+                    "shapeMatch": {"type": "string", "enum": ["match", "mismatch", "unknown"]},
+                    "colorMatch": {"type": "string", "enum": ["match", "mismatch", "unknown"]},
+                    "materialMatch": {"type": "string", "enum": ["match", "mismatch", "unknown"]},
+                    "constructionMatch": {"type": "string", "enum": ["match", "mismatch", "unknown"]},
+                    "identityEvidence": {"type": "boolean"},
+                    "contradictions": {"type": "array", "items": {"type": "string"}},
                     "evidence": {"type": "string"},
                 },
-                "required": ["index", "verdict", "confidence", "evidence"],
+                "required": [
+                    "index",
+                    "verdict",
+                    "confidence",
+                    "categoryMatch",
+                    "shapeMatch",
+                    "colorMatch",
+                    "materialMatch",
+                    "constructionMatch",
+                    "identityEvidence",
+                    "contradictions",
+                    "evidence",
+                ],
                 "additionalProperties": False,
             },
         }
@@ -75,25 +97,36 @@ VISUAL_MATCH_SCHEMA: dict[str, Any] = {
 }
 
 
-SEARCH_INSTRUCTIONS = """You find purchasable product pages for objects detected in video.
-Search the current web. Prefer the manufacturer's official product page, then established
-retailers. Return direct public HTTPS product-detail pages, never search-result pages,
-homepages, social posts, URL shorteners, marketplace search pages, or affiliate redirects.
-An exact match requires corroborated brand AND model/variant evidence. If the visual
-evidence lacks an exact model, return clearly labeled similar products instead. Do not
-invent URLs, prices, availability, brand, or model. Return an empty matches array when
-there is not enough evidence for a defensible result. When identity evidence is weak,
-return at most one visually similar item whose shape, proportions, color, material, and
-construction agree with the observations. Category alone is never enough."""
+SEARCH_INSTRUCTIONS = """You are an image-first shopping candidate researcher. The user
+supplies up to three crops of the SAME physical object from a video plus a structured
+visual fingerprint. Inspect the images before searching. Use observed silhouette,
+proportions, geometry, color, material, hardware, visible text, transcript clues, and
+source context to formulate several precise web searches. Search the current web and
+return a diverse candidate pool, not repeated variants of one weak guess.
+
+Prefer the manufacturer's official product page, then established retailers. Return
+direct public HTTPS product-detail pages, never search-result pages, homepages, social
+posts, URL shorteners, marketplace search pages, or affiliate redirects. An exact match
+requires corroborated brand AND model/variant evidence. Otherwise label the candidate
+similar. Do not invent URLs, prices, availability, brand, or model. Category alone is
+never enough. Return an empty matches array when no visually defensible candidates can
+be found. Candidate confidence is only discovery confidence; final visual verification
+happens separately."""
 
 
-VISUAL_MATCH_INSTRUCTIONS = """You are the final product-match verifier. Compare the
-target object in the first, padded video crop with each numbered retailer product image.
-Ignore any remaining surrounding room and compare only the target object.
-An exact verdict requires the same distinctive construction, proportions, materials,
-hardware, colorway, and identity evidence. Similar requires multiple concrete visual
-attributes in common. A shared category or color alone is insufficient. Reject when the
-object is too small, obscured, generic, or materially different. Be conservative."""
+VISUAL_MATCH_INSTRUCTIONS = """You are the final product-match verifier. The first group
+contains multiple video crops of ONE tracked physical object. Compare that object against
+each numbered retailer image. Ignore people and remaining room context.
+
+Judge category, silhouette/shape, color, material, and construction independently. Mark
+an axis unknown when the video cannot support it; never force a match. A clear mismatch
+in category, dominant color, material, silhouette, or construction is a hard
+contradiction and requires reject. Similar requires category and shape agreement plus
+at least one additional concrete attribute, with no hard contradiction. Exact requires
+near-identical geometry and details plus corroborating logo, visible text, brand/model,
+or unmistakable variant evidence. A shared category, generic shape, or color alone is
+insufficient. Confidence is confidence that the RETAILER PRODUCT matches the tracked
+object, not confidence that the object category was detected. Be conservative."""
 
 
 _TOKEN_NOISE = {
@@ -193,9 +226,70 @@ class RetailerSearchService:
         *,
         client: OpenAIResponsesClient | None = None,
         metadata_fetcher: MetadataFetcher = validate_product_url,
+        candidate_limit: int = 8,
+        target_crop_limit: int = 3,
+        match_model: str | None = None,
+        image_detail: str | None = None,
     ) -> None:
+        if not 1 <= candidate_limit <= 8:
+            raise ValueError("candidate_limit must be between 1 and 8")
+        if not 1 <= target_crop_limit <= 3:
+            raise ValueError("target_crop_limit must be between 1 and 3")
         self.client = client or OpenAIResponsesClient()
         self.metadata_fetcher = metadata_fetcher
+        self.candidate_limit = candidate_limit
+        self.target_crop_limit = target_crop_limit
+        self.match_model = match_model or os.getenv(
+            "SPOTTED_MATCH_MODEL", "gpt-5.6-terra"
+        )
+        self.image_detail = image_detail or os.getenv(
+            "SPOTTED_MATCH_IMAGE_DETAIL", "original"
+        )
+        if self.image_detail not in {"high", "original"}:
+            raise ValueError("image_detail must be high or original")
+
+    def _target_crops(
+        self, candidate: ProductCandidate
+    ) -> list[tuple[Appearance, str]]:
+        """Return a few high-signal, non-duplicate views of one tracked object."""
+        ranked = sorted(
+            (
+                item
+                for item in candidate.appearances
+                if item.source_path
+                and (
+                    item.bounding_box is not None
+                    or (candidate.brand and candidate.model)
+                )
+            ),
+            key=lambda item: (
+                item.bounding_box.width * item.bounding_box.height
+                if item.bounding_box
+                else 0.0,
+                len(item.evidence),
+            ),
+            reverse=True,
+        )
+        crops: list[tuple[Appearance, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for appearance in ranked:
+            box_key = (
+                json.dumps(appearance.bounding_box.to_dict(), sort_keys=True)
+                if appearance.bounding_box
+                else "full-frame"
+            )
+            key = (appearance.source_path or "", box_key)
+            if key in seen:
+                continue
+            seen.add(key)
+            image = _cropped_frame_data_url(
+                appearance.source_path or "", appearance.bounding_box
+            )
+            if image:
+                crops.append((appearance, image))
+            if len(crops) >= self.target_crop_limit:
+                break
+        return crops
 
     def search(self, candidate: ProductCandidate) -> list[RetailMatch]:
         evidence = "; ".join(
@@ -213,15 +307,38 @@ class RetailerSearchService:
             "visualEvidence": evidence,
             "detectionConfidence": candidate.confidence,
         }
+        target_crops = self._target_crops(candidate)
+        content: list[dict[str, Any]] = [
+            {
+                "type": "input_text",
+                "text": (
+                    f"Find up to {self.candidate_limit} distinct, defensible product-page candidates. "
+                    "Inspect all target crops before searching. Preserve visual contradictions for the final verifier.\n"
+                    f"TARGET FINGERPRINT: {json.dumps(query_context, ensure_ascii=True, sort_keys=True)}"
+                ),
+            }
+        ]
+        for index, (appearance, image) in enumerate(target_crops, start=1):
+            content.extend(
+                [
+                    {
+                        "type": "input_text",
+                        "text": f"TARGET CROP {index} at {appearance.start_sec:.3f}s:",
+                    },
+                    {
+                        "type": "input_image",
+                        "image_url": image,
+                        "detail": self.image_detail,
+                    },
+                ]
+            )
         payload = {
+            "model": self.match_model,
             "instructions": SEARCH_INSTRUCTIONS,
-            "input": (
-                "Search for up to two defensible product-page matches for this detected item. "
-                f"Detection evidence: {query_context}"
-            ),
+            "input": [{"role": "user", "content": content}],
             "tools": [{"type": "web_search", "search_context_size": "medium"}],
             "tool_choice": "required",
-            "reasoning": {"effort": "none"},
+            "reasoning": {"effort": "low"},
             "text": {
                 "format": {
                     "type": "json_schema",
@@ -235,24 +352,48 @@ class RetailerSearchService:
         raw_matches = result.get("matches")
         if not isinstance(raw_matches, list):
             raise AnalysisError("Retail search response is missing matches")
+        raw_items = [
+            raw
+            for raw in raw_matches[: self.candidate_limit]
+            if isinstance(raw, Mapping)
+        ]
+        expected_terms = [
+            value
+            for value in (
+                candidate.brand,
+                candidate.model,
+                candidate.name,
+                candidate.category,
+            )
+            if value
+        ]
+
+        def fetch_metadata(raw: Mapping[str, Any]) -> ProductPageMetadata | None:
+            try:
+                return self.metadata_fetcher(
+                    str(raw.get("productUrl", "")).strip(),
+                    expected_terms=expected_terms,
+                )
+            except (OSError, ValueError, TypeError):
+                return None
+
+        if raw_items:
+            with ThreadPoolExecutor(
+                max_workers=min(4, len(raw_items)),
+                thread_name_prefix="spotted-retailer-check",
+            ) as executor:
+                metadata_items = list(executor.map(fetch_metadata, raw_items))
+        else:
+            metadata_items = []
         verified: list[RetailMatch] = []
-        for raw in raw_matches[:2]:
-            if not isinstance(raw, Mapping):
-                continue
-            url = str(raw.get("productUrl", "")).strip()
-            expected_terms = [
-                value
-                for value in (candidate.brand, candidate.model, candidate.name, str(raw.get("productName", "")))
-                if value
-            ]
-            metadata = self.metadata_fetcher(url, expected_terms=expected_terms)
+        for raw, metadata in zip(raw_items, metadata_items, strict=True):
             if metadata is None:
                 continue
             requested_kind = MatchKind(str(raw.get("matchKind", "similar")))
             # An exact SKU claim is never permitted without both brand and model evidence.
             match_kind = requested_kind if candidate.brand and candidate.model else MatchKind.SIMILAR
             confidence = max(0.0, min(1.0, float(raw.get("confidence", 0))))
-            if confidence < 0.75:
+            if confidence < 0.5:
                 continue
             page_tokens = _tokens(metadata.title, str(raw.get("productName", "")))
             identity_tokens = _tokens(candidate.brand, candidate.model)
@@ -267,7 +408,7 @@ class RetailerSearchService:
                 confidence < 0.85 or not identity_tokens or not identity_tokens.issubset(page_tokens)
             ):
                 match_kind = MatchKind.SIMILAR
-            if match_kind is MatchKind.SIMILAR:
+            if match_kind is MatchKind.SIMILAR and not metadata.image_url:
                 overlap = observed_tokens & page_tokens
                 if not observed_tokens or not overlap:
                     continue
@@ -284,50 +425,55 @@ class RetailerSearchService:
                 )
             )
         ranked = sorted(verified, key=lambda item: item.confidence, reverse=True)
-        return self._visually_verify(candidate, ranked[:2])
+        return self._visually_verify(
+            candidate,
+            ranked[: self.candidate_limit],
+            target_crops=target_crops,
+        )
 
     def _visually_verify(
-        self, candidate: ProductCandidate, matches: list[RetailMatch]
+        self,
+        candidate: ProductCandidate,
+        matches: list[RetailMatch],
+        *,
+        target_crops: list[tuple[Appearance, str]] | None = None,
     ) -> list[RetailMatch]:
         if not matches:
             return []
-        appearance = max(
-            (item for item in candidate.appearances if item.source_path),
-            key=lambda item: (
-                item.bounding_box.width * item.bounding_box.height
-                if item.bounding_box
-                else 0.0
-            ),
-            default=None,
-        )
-        frame_url = (
-            _cropped_frame_data_url(
-                appearance.source_path, appearance.bounding_box
-            )
-            if appearance and appearance.source_path
-            else None
-        )
+        crops = target_crops if target_crops is not None else self._target_crops(candidate)
         comparable = [match for match in matches if match.image_url]
-        if not frame_url or not comparable:
+        if not crops or not comparable:
             # Strong text identity can still support an exact SKU. Similar-style
             # shopping results must pass the image-to-image comparison.
             return [match for match in matches if match.match_kind is MatchKind.EXACT]
 
-        box = appearance.bounding_box.to_dict() if appearance and appearance.bounding_box else None
         content: list[dict[str, Any]] = [
             {
                 "type": "input_text",
                 "text": (
                     f"Target detection: {candidate.name}; category={candidate.category}; "
                     f"color={candidate.color}; material={candidate.material}; "
-                    f"visualDescription={candidate.visual_description}; boundingBox={box}; "
-                    f"evidence={appearance.evidence if appearance else ''}. "
-                    "The supplied video image is a padded crop centered on the target object."
+                    f"brand={candidate.brand}; model={candidate.model}; "
+                    f"visibleText={candidate.visible_text}; "
+                    f"visualDescription={candidate.visual_description}. "
+                    "All TARGET CROP images show the same tracked physical object."
                 ),
             },
-            {"type": "input_text", "text": "VIDEO CROP (target object):"},
-            {"type": "input_image", "image_url": frame_url, "detail": "high"},
         ]
+        for index, (appearance, image) in enumerate(crops, start=1):
+            content.extend(
+                [
+                    {
+                        "type": "input_text",
+                        "text": f"TARGET CROP {index} at {appearance.start_sec:.3f}s:",
+                    },
+                    {
+                        "type": "input_image",
+                        "image_url": image,
+                        "detail": self.image_detail,
+                    },
+                ]
+            )
         for index, match in enumerate(comparable):
             content.extend(
                 [
@@ -335,13 +481,18 @@ class RetailerSearchService:
                         "type": "input_text",
                         "text": f"RETAILER IMAGE {index}: {match.product_name}",
                     },
-                    {"type": "input_image", "image_url": match.image_url, "detail": "high"},
+                    {
+                        "type": "input_image",
+                        "image_url": match.image_url,
+                        "detail": "high",
+                    },
                 ]
             )
         payload = {
+            "model": self.match_model,
             "instructions": VISUAL_MATCH_INSTRUCTIONS,
             "input": [{"role": "user", "content": content}],
-            "reasoning": {"effort": "none"},
+            "reasoning": {"effort": "low"},
             "text": {
                 "format": {
                     "type": "json_schema",
@@ -369,12 +520,46 @@ class RetailerSearchService:
                 0.0, min(1.0, float(comparison.get("confidence", 0)))
             )
             verdict = str(comparison.get("verdict", "reject"))
-            if verdict == "reject" or visual_confidence < 0.75:
+            axes = {
+                name: str(comparison.get(name, "unknown"))
+                for name in (
+                    "categoryMatch",
+                    "shapeMatch",
+                    "colorMatch",
+                    "materialMatch",
+                    "constructionMatch",
+                )
+            }
+            contradictions = comparison.get("contradictions")
+            hard_mismatch = any(value == "mismatch" for value in axes.values())
+            match_count = sum(value == "match" for value in axes.values())
+            similar_supported = (
+                axes["categoryMatch"] == "match"
+                and axes["shapeMatch"] == "match"
+                and match_count >= 3
+            )
+            if (
+                verdict == "reject"
+                or visual_confidence < 0.82
+                or hard_mismatch
+                or not similar_supported
+            ):
                 continue
-            match_kind = (
-                MatchKind.EXACT
-                if verdict == "exact" and match.match_kind is MatchKind.EXACT
-                else MatchKind.SIMILAR
+            exact_supported = (
+                verdict == "exact"
+                and match.match_kind is MatchKind.EXACT
+                and bool(comparison.get("identityEvidence"))
+                and visual_confidence >= 0.92
+                and match_count == len(axes)
+            )
+            match_kind = MatchKind.EXACT if exact_supported else MatchKind.SIMILAR
+            final_confidence = min(
+                0.99, 0.8 * visual_confidence + 0.2 * match.confidence
+            )
+            contradiction_note = (
+                f"; contradictions reviewed: {', '.join(str(item) for item in contradictions)}"
+                if isinstance(contradictions, list) and contradictions
+                else ""
             )
             accepted.append(
                 RetailMatch(
@@ -382,8 +567,11 @@ class RetailerSearchService:
                     retailer_name=match.retailer_name,
                     product_url=match.product_url,
                     match_kind=match_kind,
-                    confidence=min(match.confidence, visual_confidence),
-                    evidence=f"{match.evidence}; visual check: {comparison.get('evidence', '')}",
+                    confidence=final_confidence,
+                    evidence=(
+                        f"{match.evidence}; visual check: {comparison.get('evidence', '')}"
+                        f"{contradiction_note}"
+                    ),
                     image_url=match.image_url,
                     price=match.price,
                 )

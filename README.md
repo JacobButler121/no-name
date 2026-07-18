@@ -1,6 +1,6 @@
 # Spotted
 
-Spotted turns public YouTube, TikTok, and Instagram videos into timestamped shopping findings. It retrieves a video, extracts representative frames, uses OpenAI vision to identify products, groups repeated appearances, searches the live web for defensible matches, and streams the results into a synchronized video workspace.
+Spotted turns public YouTube, TikTok, and Instagram videos into timestamped shopping findings. It retrieves a video, samples every five seconds, uses OpenAI vision to identify and track products, preserves timestamps from near-identical scenes without analyzing them twice, and performs image-informed web search plus multi-image verification before showing a shopping link.
 
 Spotted never substitutes canned product results. If a social platform blocks retrieval, the interface offers a real video-upload fallback.
 
@@ -25,6 +25,10 @@ Add the team OpenAI key to `.env.local`:
 ```text
 OPENAI_API_KEY=your-key-here
 ```
+
+The default model split keeps routine frame scanning on `gpt-5.6-luna` and
+uses `gpt-5.6-terra` only for one image-first search and verification pass per
+unique tracked object. Both values can be overridden in `.env.local`.
 
 Then start the complete application:
 

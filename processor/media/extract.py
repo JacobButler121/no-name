@@ -82,9 +82,23 @@ class FrameExtractor:
             raise ExtractionError(detail[-1000:]) from exc
 
         sampled_paths = sorted(frames_dir.glob("sample-*.jpg"))
-        retained_paths = self._remove_similar_frames(sampled_paths)
+        retained_paths, duplicate_representatives = self._cluster_similar_frames(
+            sampled_paths
+        )
         frames: list[dict[str, Any]] = []
         retained_set = set(retained_paths)
+        sample_index_by_path = {
+            path: sample_index for sample_index, path in enumerate(sampled_paths)
+        }
+        similar_timestamps: dict[Path, list[float]] = {
+            path: [] for path in retained_paths
+        }
+        for duplicate, representative in duplicate_representatives.items():
+            sample_index = sample_index_by_path[duplicate]
+            timestamp = sample_index * interval
+            similar_timestamps[representative].append(
+                round(min(timestamp, duration or timestamp), 3)
+            )
         stable_index = 0
         for sample_index, path in enumerate(sampled_paths):
             if path not in retained_set:
@@ -104,6 +118,13 @@ class FrameExtractor:
                     "width": int(metadata.get("width") or 0),
                     "height": int(metadata.get("height") or 0),
                     "source": "five_second_unique",
+                    **(
+                        {
+                            "similarTimestamps": sorted(similar_timestamps[path])
+                        }
+                        if similar_timestamps[path]
+                        else {}
+                    ),
                 }
             )
         if not frames:
@@ -121,30 +142,46 @@ class FrameExtractor:
         return frames, manifest_path
 
     def _remove_similar_frames(self, paths: list[Path]) -> list[Path]:
+        retained, _ = self._cluster_similar_frames(paths)
+        return retained
+
+    def _cluster_similar_frames(
+        self, paths: list[Path]
+    ) -> tuple[list[Path], dict[Path, Path]]:
         """Remove near-identical samples before they can consume vision tokens.
 
         A tiny 16x16 grayscale fingerprint is generated locally with ffmpeg. A
         sample is retained only when it differs meaningfully from every prior
-        retained sample, which also catches a scene that returns later.
+        retained sample. Skipped samples retain a representative mapping so the
+        AI result can still include every five-second timestamp.
         """
         if len(paths) < 2:
-            return paths
+            return paths, {}
         hashes = self._perceptual_hashes(paths)
         if len(hashes) != len(paths):
-            return paths
+            return paths, {}
         retained: list[Path] = []
         retained_hashes: list[int] = []
+        duplicate_representatives: dict[Path, Path] = {}
         bit_count = 16 * 16
         for path, fingerprint in zip(paths, hashes, strict=True):
-            maximum_similarity = max(
-                (1.0 - ((fingerprint ^ prior).bit_count() / bit_count) for prior in retained_hashes),
-                default=0.0,
+            scored = [
+                (
+                    1.0 - ((fingerprint ^ prior).bit_count() / bit_count),
+                    retained[index],
+                )
+                for index, prior in enumerate(retained_hashes)
+            ]
+            maximum_similarity, representative = max(
+                scored, default=(0.0, None), key=lambda item: item[0]
             )
             if maximum_similarity >= self.similarity_threshold:
+                if representative is not None:
+                    duplicate_representatives[path] = representative
                 continue
             retained.append(path)
             retained_hashes.append(fingerprint)
-        return retained or paths[:1]
+        return (retained or paths[:1]), duplicate_representatives
 
     def _perceptual_hashes(self, paths: list[Path]) -> list[int]:
         pattern = paths[0].parent / "sample-%08d.jpg"

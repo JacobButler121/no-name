@@ -100,6 +100,7 @@ type JobResponse = {
   status?: string;
   mediaUrl?: string | null;
   findings?: ProductFinding[];
+  metadata?: { width?: number; height?: number; durationSec?: number };
   error?: { message?: string } | string;
   message?: string;
   detail?: string;
@@ -141,7 +142,7 @@ const eventCopy: Record<EventType, string> = {
   analyzing_frame: "Looking for recognizable products",
   candidate_found: "Product candidate spotted",
   merging_duplicates: "Comparing repeat appearances",
-  searching_retailers: "Searching trusted retailers",
+  searching_retailers: "Searching product images and retailers",
   product_ready: "Shopping match ready",
   retrieval_blocked: "Upload needed",
   completed: "Analysis complete",
@@ -202,8 +203,11 @@ export default function Home() {
   const [mobileResults, setMobileResults] = useState(false);
   const [videoReady, setVideoReady] = useState(false);
   const [mediaAvailable, setMediaAvailable] = useState(false);
+  const [videoDimensions, setVideoDimensions] = useState({ width: 16, height: 9 });
+  const [videoRect, setVideoRect] = useState({ left: 0, top: 0, width: 0, height: 0 });
   const streamRef = useRef<EventSource | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const videoStageRef = useRef<HTMLDivElement>(null);
   const youtubeHostRef = useRef<HTMLDivElement>(null);
   const youtubePlayerRef = useRef<YouTubePlayer | null>(null);
   const pendingSeekRef = useRef<number | null>(null);
@@ -217,6 +221,29 @@ export default function Home() {
   const progress = status === "complete" ? 100 : Math.max(6, ((Math.max(0, progressIndex) + 1) / eventOrder.length) * 100);
 
   useEffect(() => () => streamRef.current?.close(), []);
+
+  useEffect(() => {
+    const stage = videoStageRef.current;
+    if (!stage) return;
+    const updateRect = () => {
+      const stageWidth = stage.clientWidth;
+      const stageHeight = stage.clientHeight;
+      if (!stageWidth || !stageHeight) return;
+      const sourceRatio = videoDimensions.width / videoDimensions.height || 16 / 9;
+      const stageRatio = stageWidth / stageHeight;
+      if (stageRatio > sourceRatio) {
+        const width = stageHeight * sourceRatio;
+        setVideoRect({ left: (stageWidth - width) / 2, top: 0, width, height: stageHeight });
+      } else {
+        const height = stageWidth / sourceRatio;
+        setVideoRect({ left: 0, top: (stageHeight - height) / 2, width: stageWidth, height });
+      }
+    };
+    updateRect();
+    const observer = new ResizeObserver(updateRect);
+    observer.observe(stage);
+    return () => observer.disconnect();
+  }, [status, videoDimensions.width, videoDimensions.height]);
 
   useEffect(() => {
     if (!youtubeId) return;
@@ -294,6 +321,9 @@ export default function Home() {
       const data = await responseJson(response);
       if (!response.ok) throw new Error(responseMessage(data, "Could not load the completed findings."));
       const findings = Array.isArray(data.findings) ? data.findings.filter(isFinding) : [];
+      if (data.metadata?.width && data.metadata?.height) {
+        setVideoDimensions({ width: data.metadata.width, height: data.metadata.height });
+      }
       setMediaAvailable(Boolean(data.mediaUrl));
       setProducts(findings);
       setActiveId((current) => current || findings.find((item) => item.productUrl)?.id || "");
@@ -309,7 +339,12 @@ export default function Home() {
     try { payload = raw ? JSON.parse(raw) : {}; } catch { /* named event can have no JSON body */ }
     const eventMessage = typeof payload.message === "string" ? payload.message : "";
     recordEvent(type);
-    if (type === "extracting_frames") setMediaAvailable(true);
+    if (type === "extracting_frames") {
+      setMediaAvailable(true);
+      const width = Number(payload.width);
+      const height = Number(payload.height);
+      if (width > 0 && height > 0) setVideoDimensions({ width, height });
+    }
     if (type === "product_ready" && isFinding(payload)) addFinding(payload);
     if (type === "retrieval_blocked") {
       setStatus("blocked");
@@ -367,6 +402,7 @@ export default function Home() {
     setMobileResults(false);
     setVideoReady(false);
     setMediaAvailable(false);
+    setVideoDimensions({ width: 16, height: 9 });
     pendingSeekRef.current = null;
     setSourceUrl(videoUrl);
     try {
@@ -401,6 +437,7 @@ export default function Home() {
     setSourceUrl("");
     setVideoReady(false);
     setMediaAvailable(false);
+    setVideoDimensions({ width: 16, height: 9 });
     pendingSeekRef.current = null;
     try {
       const response = await fetch("/api/jobs/upload", { method: "POST", body: form });
@@ -428,6 +465,7 @@ export default function Home() {
     setError("");
     setVideoReady(false);
     setMediaAvailable(false);
+    setVideoDimensions({ width: 16, height: 9 });
     pendingSeekRef.current = null;
     setSourceUrl("");
     if (id) {
@@ -461,7 +499,12 @@ export default function Home() {
   }
 
   const workspaceVisible = status === "starting" || status === "running" || status === "complete";
-  const currentBox = activeAppearance?.boundingBox || activeProduct?.appearances.find((appearance) => currentTime >= appearance.startSec && currentTime <= (appearance.endSec ?? appearance.startSec + 3))?.boundingBox;
+  const currentAppearance = activeAppearance && Math.abs(currentTime - activeAppearance.startSec) <= 3
+    ? activeAppearance
+    : activeProduct?.appearances
+        .filter((appearance) => Math.abs(currentTime - appearance.startSec) <= 3)
+        .sort((left, right) => Math.abs(currentTime - left.startSec) - Math.abs(currentTime - right.startSec))[0];
+  const currentBox = currentAppearance?.boundingBox;
 
   return (
     <main className="app-shell">
@@ -525,7 +568,7 @@ export default function Home() {
               <div><span className="step-number">01</span><div><strong>Video</strong><small>{jobId ? `${platform} · Job ${jobId.slice(0, 8)}` : "Creating secure session"}</small></div></div>
               <span className="source-badge">{focus.trim() ? "Focused analysis" : "Live analysis"}</span>
             </div>
-            <div className="video-stage real-video-stage">
+            <div ref={videoStageRef} className="video-stage real-video-stage">
               {youtubeId ? (
                 <div
                   ref={youtubeHostRef}
@@ -533,10 +576,10 @@ export default function Home() {
                   aria-label="YouTube video player"
                 />
               ) : jobId && mediaAvailable ? (
-                <video ref={videoRef} controls playsInline preload="metadata" src={`/api/jobs/${encodeURIComponent(jobId)}/media`} onCanPlay={() => setVideoReady(true)} onTimeUpdate={(event) => { setCurrentTime(event.currentTarget.currentTime); if (activeAppearance && Math.abs(event.currentTarget.currentTime - activeAppearance.startSec) > 4) setActiveAppearance(null); }} />
+                <video ref={videoRef} controls playsInline preload="metadata" src={`/api/jobs/${encodeURIComponent(jobId)}/media`} onCanPlay={(event) => { setVideoReady(true); if (event.currentTarget.videoWidth && event.currentTarget.videoHeight) setVideoDimensions({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight }); }} onTimeUpdate={(event) => { setCurrentTime(event.currentTarget.currentTime); if (activeAppearance && Math.abs(event.currentTarget.currentTime - activeAppearance.startSec) > 3) setActiveAppearance(null); }} />
               ) : null}
               {!videoReady && <div className="video-loading"><div className="scan-orbit"><span>AI</span><i /><i /><i /></div><strong>Preparing playback</strong><small>The first frames will appear here.</small></div>}
-              {currentBox && videoReady && activeProduct && <div className="detection-box" style={{ left: `${currentBox.x * 100}%`, top: `${currentBox.y * 100}%`, width: `${currentBox.width * 100}%`, height: `${currentBox.height * 100}%` }}><span>{activeProduct.name} · {productPercent(activeProduct.confidence)}%</span></div>}
+              {currentBox && videoReady && activeProduct && <div className="detection-layer" style={videoRect}><div className="detection-box" style={{ left: `${currentBox.x * 100}%`, top: `${currentBox.y * 100}%`, width: `${currentBox.width * 100}%`, height: `${currentBox.height * 100}%` }}><span>{activeProduct.name} · {productPercent(activeProduct.matchConfidence ?? activeProduct.confidence)}%</span></div></div>}
             </div>
             <div className="moments">
               <div><span className="moment-count">{mainProducts.reduce((sum, product) => sum + product.appearances.length, 0).toString().padStart(2, "0")}</span><span>Matched moments<br />across {mainProducts.length || "—"} verified finds</span></div>
