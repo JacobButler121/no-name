@@ -5,6 +5,7 @@ const PROCESSOR_URL = (
 const REQUEST_HEADERS = [
   "accept",
   "content-type",
+  "last-event-id",
   "range",
 ] as const;
 

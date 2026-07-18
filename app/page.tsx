@@ -14,107 +14,40 @@ type EventType =
   | "completed"
   | "failed";
 
-type Product = {
+type Appearance = {
+  startSec: number;
+  endSec?: number;
+  thumbnailUrl?: string;
+  boundingBox?: { x: number; y: number; width: number; height: number };
+  evidence: string;
+};
+
+type ProductFinding = {
   id: string;
   name: string;
-  brand: string;
   category: string;
-  description: string;
-  match: "exact" | "similar" | "possible";
+  matchKind: "exact" | "similar" | "possible";
   confidence: number;
-  price: string;
-  retailer: string;
-  retailerUrl: string;
-  timestamps: number[];
-  color: string;
-  box: { x: number; y: number; width: number; height: number };
+  brand?: string;
+  model?: string;
+  retailerName?: string;
+  productUrl?: string;
+  imageUrl?: string;
+  price?: string;
+  appearances: Appearance[];
 };
 
 type JobResponse = {
-  id?: string;
-  job_id?: string;
+  jobId?: string;
+  platform?: string;
   status?: string;
-  products?: Product[];
-  results?: { products?: Product[] };
+  findings?: ProductFinding[];
+  error?: { message?: string } | string;
+  message?: string;
+  detail?: string;
 };
 
-const fixture: Product[] = [
-  {
-    id: "air75",
-    name: "Air75 V2",
-    brand: "NuPhy",
-    category: "Low-profile keyboard",
-    description: "75% wireless mechanical keyboard · Basalt Black",
-    match: "exact",
-    confidence: 98,
-    price: "$119.95",
-    retailer: "NuPhy",
-    retailerUrl: "https://nuphy.com/products/air75-v2",
-    timestamps: [4, 18, 27],
-    color: "graphite",
-    box: { x: 14, y: 59, width: 52, height: 18 },
-  },
-  {
-    id: "lamp",
-    name: "Type 75 Desk Lamp",
-    brand: "Anglepoise",
-    category: "Task lighting",
-    description: "Adjustable desk lamp · Jet Black",
-    match: "similar",
-    confidence: 91,
-    price: "$340.00",
-    retailer: "Anglepoise",
-    retailerUrl: "https://www.anglepoise.com/products/type-75-desk-lamp",
-    timestamps: [9, 21],
-    color: "sand",
-    box: { x: 68, y: 17, width: 20, height: 55 },
-  },
-  {
-    id: "headphones",
-    name: "WH-1000XM5",
-    brand: "Sony",
-    category: "Headphones",
-    description: "Wireless noise canceling headphones · Black",
-    match: "exact",
-    confidence: 96,
-    price: "$399.99",
-    retailer: "Sony",
-    retailerUrl: "https://electronics.sony.com/audio/headphones/headband/p/wh1000xm5-b",
-    timestamps: [14, 24],
-    color: "blue",
-    box: { x: 72, y: 28, width: 18, height: 31 },
-  },
-  {
-    id: "bottle",
-    name: "24 oz Standard Mouth",
-    brand: "Hydro Flask",
-    category: "Drinkware",
-    description: "Insulated stainless steel bottle · White",
-    match: "possible",
-    confidence: 73,
-    price: "$39.95",
-    retailer: "Hydro Flask",
-    retailerUrl: "https://www.hydroflask.com/24-oz-standard-mouth",
-    timestamps: [7],
-    color: "white",
-    box: { x: 6, y: 25, width: 10, height: 34 },
-  },
-];
-
-const progressCopy: Record<EventType, string> = {
-  retrieving_video: "Retrieving video",
-  extracting_frames: "Mapping scenes",
-  analyzing_frame: "Analyzing frame",
-  candidate_found: "Candidate found",
-  merging_duplicates: "Merging repeat sightings",
-  searching_retailers: "Checking trusted retailers",
-  product_ready: "Product match ready",
-  retrieval_blocked: "Upload needed",
-  completed: "Analysis complete",
-  failed: "Analysis stopped",
-};
-
-const demoEvents: EventType[] = [
+const eventOrder: EventType[] = [
   "retrieving_video",
   "extracting_frames",
   "analyzing_frame",
@@ -125,295 +58,356 @@ const demoEvents: EventType[] = [
   "completed",
 ];
 
+const eventCopy: Record<EventType, string> = {
+  retrieving_video: "Retrieving video",
+  extracting_frames: "Mapping scenes and timestamps",
+  analyzing_frame: "Looking for recognizable products",
+  candidate_found: "Product candidate spotted",
+  merging_duplicates: "Comparing repeat appearances",
+  searching_retailers: "Searching trusted retailers",
+  product_ready: "Shopping match ready",
+  retrieval_blocked: "Upload needed",
+  completed: "Analysis complete",
+  failed: "Analysis stopped",
+};
+
 function formatTime(seconds: number) {
-  const mins = Math.floor(seconds / 60);
-  const secs = Math.floor(seconds % 60);
-  return `${mins}:${secs.toString().padStart(2, "0")}`;
+  const value = Math.max(0, Math.floor(Number.isFinite(seconds) ? seconds : 0));
+  const hours = Math.floor(value / 3600);
+  const minutes = Math.floor((value % 3600) / 60);
+  const secs = value % 60;
+  return hours
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+    : `${minutes}:${String(secs).padStart(2, "0")}`;
 }
 
-function normalizeProducts(data: JobResponse): Product[] {
-  const products = data.products ?? data.results?.products ?? [];
-  return products.map((product, index) => ({
-    ...product,
-    id: product.id ?? `product-${index}`,
-    brand: product.brand ?? "Unconfirmed brand",
-    description: product.description ?? product.category ?? "Product match",
-    match: product.match ?? "similar",
-    confidence: product.confidence ?? 0,
-    price: product.price ?? "View price",
-    retailer: product.retailer ?? "Retailer",
-    retailerUrl: product.retailerUrl ?? "#",
-    timestamps: product.timestamps ?? [],
-    color: product.color ?? "graphite",
-    box: product.box ?? { x: 18, y: 22, width: 35, height: 35 },
-  }));
+function productPercent(confidence: number) {
+  const normalized = confidence <= 1 ? confidence * 100 : confidence;
+  return Math.round(Math.min(100, Math.max(0, normalized)));
+}
+
+function isFinding(value: unknown): value is ProductFinding {
+  if (!value || typeof value !== "object") return false;
+  const product = value as Partial<ProductFinding>;
+  return typeof product.id === "string" && typeof product.name === "string" && Array.isArray(product.appearances);
+}
+
+function responseMessage(data: JobResponse, fallback: string) {
+  if (data.detail) return data.detail;
+  if (data.message) return data.message;
+  if (typeof data.error === "string") return data.error;
+  if (data.error?.message) return data.error.message;
+  return fallback;
+}
+
+async function responseJson(response: Response): Promise<JobResponse> {
+  try {
+    return (await response.json()) as JobResponse;
+  } catch {
+    return {};
+  }
 }
 
 export default function Home() {
   const [url, setUrl] = useState("");
   const [jobId, setJobId] = useState<string | null>(null);
-  const [status, setStatus] = useState<"idle" | "running" | "complete" | "blocked" | "error">("idle");
+  const [platform, setPlatform] = useState("video");
+  const [status, setStatus] = useState<"idle" | "starting" | "running" | "complete" | "blocked" | "error">("idle");
   const [eventType, setEventType] = useState<EventType>("retrieving_video");
-  const [eventIndex, setEventIndex] = useState(0);
-  const [products, setProducts] = useState<Product[]>(fixture);
-  const [activeId, setActiveId] = useState(fixture[0].id);
-  const [currentTime, setCurrentTime] = useState(4);
+  const [eventHistory, setEventHistory] = useState<EventType[]>([]);
+  const [products, setProducts] = useState<ProductFinding[]>([]);
+  const [activeId, setActiveId] = useState("");
+  const [activeAppearance, setActiveAppearance] = useState<Appearance | null>(null);
+  const [currentTime, setCurrentTime] = useState(0);
   const [error, setError] = useState("");
-  const [isFixture, setIsFixture] = useState(true);
   const [mobileResults, setMobileResults] = useState(false);
+  const [videoReady, setVideoReady] = useState(false);
+  const streamRef = useRef<EventSource | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const activeProduct = products.find((product) => product.id === activeId) ?? products[0];
+  const mainProducts = products.filter((product) => product.matchKind !== "possible");
+  const possibleProducts = products.filter((product) => product.matchKind === "possible");
+  const progressIndex = eventOrder.indexOf(eventType);
+  const progress = status === "complete" ? 100 : Math.max(6, ((Math.max(0, progressIndex) + 1) / eventOrder.length) * 100);
 
-  useEffect(() => {
-    if (status !== "running" || !isFixture) return;
-    if (eventIndex >= demoEvents.length - 1) {
-      setStatus("complete");
-      setEventType("completed");
-      return;
-    }
-    const timer = window.setTimeout(() => {
-      const next = eventIndex + 1;
-      setEventIndex(next);
-      setEventType(demoEvents[next]);
-      if (next >= 3) setProducts(fixture.slice(0, Math.min(next - 2, fixture.length)));
-    }, 620);
-    return () => window.clearTimeout(timer);
-  }, [eventIndex, isFixture, status]);
+  useEffect(() => () => streamRef.current?.close(), []);
 
-  useEffect(() => {
-    if (!jobId || isFixture || status !== "running") return;
-    const stream = new EventSource(`/api/jobs/${encodeURIComponent(jobId)}/events`);
-    stream.onmessage = (message) => {
-      try {
-        const payload = JSON.parse(message.data) as { type: EventType; product?: Product; message?: string };
-        setEventType(payload.type);
-        if (payload.type === "product_ready" && payload.product) {
-          setProducts((current) => [...current.filter((item) => item.id !== payload.product?.id), payload.product!]);
-        }
-        if (payload.type === "retrieval_blocked") {
-          setStatus("blocked");
-          setError(payload.message ?? "This platform blocked retrieval. Upload the video to keep going.");
-          stream.close();
-        }
-        if (payload.type === "failed") {
-          setStatus("error");
-          setError(payload.message ?? "The processor could not finish this video.");
-          stream.close();
-        }
-        if (payload.type === "completed") {
-          stream.close();
-          void fetchJob(jobId);
-        }
-      } catch {
-        // Ignore malformed heartbeat messages from a tunnel or proxy.
-      }
-    };
-    stream.onerror = () => stream.close();
-    return () => stream.close();
-  }, [isFixture, jobId, status]);
+  function recordEvent(type: EventType) {
+    setEventType(type);
+    setEventHistory((history) => history.includes(type) ? history : [...history, type]);
+  }
+
+  function addFinding(product: ProductFinding) {
+    setProducts((current) => {
+      const matchIndex = current.findIndex((item) => item.id === product.id);
+      if (matchIndex < 0) return [...current, product];
+      const next = [...current];
+      next[matchIndex] = product;
+      return next;
+    });
+    setActiveId((current) => current || product.id);
+  }
 
   async function fetchJob(id: string) {
     try {
-      const response = await fetch(`/api/jobs/${encodeURIComponent(id)}`);
-      if (!response.ok) throw new Error("Could not load the completed findings.");
-      const data = (await response.json()) as JobResponse;
-      const nextProducts = normalizeProducts(data);
-      setProducts(nextProducts);
-      setActiveId(nextProducts[0]?.id ?? "");
-      setStatus("complete");
+      const response = await fetch(`/api/jobs/${encodeURIComponent(id)}`, { cache: "no-store" });
+      const data = await responseJson(response);
+      if (!response.ok) throw new Error(responseMessage(data, "Could not load the completed findings."));
+      const findings = Array.isArray(data.findings) ? data.findings.filter(isFinding) : [];
+      setProducts(findings);
+      setActiveId((current) => current || findings[0]?.id || "");
+      setStatus(data.status === "failed" ? "error" : "complete");
     } catch (reason) {
       setStatus("error");
       setError(reason instanceof Error ? reason.message : "Could not load findings.");
     }
   }
 
+  function handleServerEvent(type: EventType, raw: string, id: string) {
+    let payload: Record<string, unknown> = {};
+    try { payload = raw ? JSON.parse(raw) : {}; } catch { /* named event can have no JSON body */ }
+    recordEvent(type);
+    if (type === "product_ready" && isFinding(payload)) addFinding(payload);
+    if (type === "retrieval_blocked") {
+      setStatus("blocked");
+      setError(typeof payload.message === "string" ? payload.message : "This platform did not provide the video. Upload the file to continue.");
+      streamRef.current?.close();
+    } else if (type === "failed") {
+      setStatus("error");
+      setError(typeof payload.message === "string" ? payload.message : "The processor could not finish this video.");
+      streamRef.current?.close();
+    } else if (type === "completed") {
+      setStatus("complete");
+      streamRef.current?.close();
+      void fetchJob(id);
+    } else {
+      setStatus("running");
+    }
+  }
+
+  function connectEvents(id: string) {
+    streamRef.current?.close();
+    const stream = new EventSource(`/api/jobs/${encodeURIComponent(id)}/events`);
+    streamRef.current = stream;
+    (Object.keys(eventCopy) as EventType[]).forEach((type) => {
+      stream.addEventListener(type, (message) => handleServerEvent(type, (message as MessageEvent).data, id));
+    });
+    stream.onmessage = (message) => {
+      try {
+        const payload = JSON.parse(message.data) as { type?: EventType };
+        if (payload.type && payload.type in eventCopy) handleServerEvent(payload.type, message.data, id);
+      } catch { /* named events are handled above */ }
+    };
+  }
+
+  function startJob(data: JobResponse) {
+    if (!data.jobId) throw new Error("The processor did not return a job ID.");
+    setJobId(data.jobId);
+    setPlatform(data.platform || "video");
+    setStatus("running");
+    connectEvents(data.jobId);
+  }
+
   async function submitUrl(event: FormEvent) {
     event.preventDefault();
-    if (!url.trim()) return;
-    setStatus("running");
+    const videoUrl = url.trim();
+    if (!videoUrl) return;
+    try { new URL(videoUrl); } catch { setError("Paste a complete YouTube, TikTok, or Instagram URL."); setStatus("error"); return; }
+    setStatus("starting");
     setEventType("retrieving_video");
+    setEventHistory(["retrieving_video"]);
     setProducts([]);
+    setActiveId("");
+    setActiveAppearance(null);
     setError("");
-    setIsFixture(false);
     setMobileResults(false);
+    setVideoReady(false);
     try {
       const response = await fetch("/api/jobs", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ url: url.trim() }),
+        body: JSON.stringify({ url: videoUrl }),
       });
-      const data = (await response.json()) as JobResponse & { message?: string };
-      if (!response.ok) throw new Error(data.message ?? "The video processor is unavailable.");
-      const id = data.id ?? data.job_id;
-      if (!id) throw new Error("The processor did not return a job ID.");
-      setJobId(id);
+      const data = await responseJson(response);
+      if (!response.ok) throw new Error(responseMessage(data, "The video processor is unavailable."));
+      startJob(data);
     } catch (reason) {
       setStatus("error");
       setError(reason instanceof Error ? reason.message : "Could not start this video.");
     }
   }
 
-  function runDemo() {
-    setUrl("https://youtube.com/watch?v=desk-setup-tour");
-    setJobId(null);
-    setStatus("running");
-    setEventType("retrieving_video");
-    setEventIndex(0);
-    setProducts([]);
-    setError("");
-    setIsFixture(true);
-    setMobileResults(false);
-  }
-
   async function uploadVideo(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
     const form = new FormData();
-    form.append("video", file);
-    setStatus("running");
+    form.append("file", file);
+    setStatus("starting");
     setEventType("retrieving_video");
+    setEventHistory(["retrieving_video"]);
     setProducts([]);
+    setActiveId("");
+    setActiveAppearance(null);
     setError("");
-    setIsFixture(false);
+    setPlatform("upload");
+    setVideoReady(false);
     try {
       const response = await fetch("/api/jobs/upload", { method: "POST", body: form });
-      const data = (await response.json()) as JobResponse & { message?: string };
-      if (!response.ok) throw new Error(data.message ?? "The upload could not be started.");
-      const id = data.id ?? data.job_id;
-      if (!id) throw new Error("The processor did not return a job ID.");
-      setJobId(id);
+      const data = await responseJson(response);
+      if (!response.ok) throw new Error(responseMessage(data, "The upload could not be started."));
+      startJob(data);
     } catch (reason) {
       setStatus("error");
       setError(reason instanceof Error ? reason.message : "Could not upload this video.");
+    } finally {
+      event.target.value = "";
     }
   }
 
-  function seek(product: Product, timestamp: number) {
+  async function newSearch() {
+    streamRef.current?.close();
+    const id = jobId;
+    setJobId(null);
+    setStatus("idle");
+    setProducts([]);
+    setEventHistory([]);
+    setActiveId("");
+    setActiveAppearance(null);
+    setCurrentTime(0);
+    setError("");
+    setVideoReady(false);
+    if (id) {
+      try { await fetch(`/api/jobs/${encodeURIComponent(id)}`, { method: "DELETE", keepalive: true }); } catch { /* jobs also expire */ }
+    }
+  }
+
+  function seek(product: ProductFinding, appearance: Appearance) {
     setActiveId(product.id);
-    setCurrentTime(timestamp);
+    setActiveAppearance(appearance);
+    setCurrentTime(appearance.startSec);
     setMobileResults(false);
     if (videoRef.current) {
-      videoRef.current.currentTime = timestamp;
+      videoRef.current.currentTime = appearance.startSec;
       void videoRef.current.play().catch(() => undefined);
     }
   }
 
-  const mainProducts = products.filter((product) => product.match !== "possible");
-  const possibleProducts = products.filter((product) => product.match === "possible");
-  const progress = Math.max(7, ((demoEvents.indexOf(eventType) + 1) / demoEvents.length) * 100);
+  const workspaceVisible = status === "starting" || status === "running" || status === "complete";
+  const currentBox = activeAppearance?.boundingBox || activeProduct?.appearances.find((appearance) => currentTime >= appearance.startSec && currentTime <= (appearance.endSec ?? appearance.startSec + 3))?.boundingBox;
 
   return (
     <main className="app-shell">
       <header className="topbar">
-        <a className="logo" href="#top" aria-label="Spotted home"><span className="logo-mark">S</span>Spotted</a>
-        <div className="topbar-center"><span className="live-dot" />AI video shopping</div>
-        <button className="header-action" onClick={() => document.getElementById("composer")?.focus()}>New search <span>↗</span></button>
+        <button className="logo logo-button" type="button" onClick={() => void newSearch()} aria-label="Spotted home"><span className="logo-mark">S</span>Spotted</button>
+        <div className="topbar-center"><span className="live-dot" />AI product discovery</div>
+        <button className="header-action" onClick={() => void newSearch()}>New search <span>＋</span></button>
       </header>
 
       <section className="intro" id="top">
-        <div>
-          <p className="kicker">See it. Find it.</p>
-          <h1>Turn any video<br />into a <em>shopping list.</em></h1>
-        </div>
-        <p className="intro-note">Paste a public video. Spotted finds the products, remembers every appearance, and checks the web for the closest buyable match.</p>
+        <div><p className="kicker">Shop what you watch</p><h1>Spot it in a video.<br /><em>Find it online.</em></h1></div>
+        <p className="intro-note">Spotted studies the scenes, identifies what matters, and finds the closest products you can actually buy.</p>
       </section>
 
       <form className="composer" onSubmit={submitUrl}>
-        <label htmlFor="composer">Video link</label>
+        <label htmlFor="composer">Drop a public video link</label>
         <div className="composer-row">
           <span className="composer-icon">↗</span>
-          <input id="composer" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="Paste a YouTube, TikTok, or Instagram link" inputMode="url" />
-          <button type="submit" disabled={!url.trim() || status === "running"}>{status === "running" && !isFixture ? "Analyzing" : "Find products"}<span>→</span></button>
+          <input id="composer" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="YouTube, TikTok, or Instagram URL" inputMode="url" disabled={status === "starting"} />
+          <button type="submit" disabled={!url.trim() || status === "starting"}>{status === "starting" ? "Starting" : "Find products"}<span>→</span></button>
         </div>
         <div className="composer-meta">
-          <div className="platforms"><span>YouTube</span><i /> <span>TikTok</span><i /> <span>Instagram</span></div>
-          <div className="composer-links"><button type="button" onClick={runDemo}>Run the 30-second demo</button><button type="button" onClick={() => fileRef.current?.click()}>or upload a video</button></div>
+          <div className="platforms"><span>YouTube</span><i /><span>TikTok</span><i /><span>Instagram</span></div>
+          <div className="composer-links"><button type="button" onClick={() => fileRef.current?.click()}>Upload a video instead</button></div>
         </div>
-        <input ref={fileRef} className="file-input" type="file" accept="video/mp4,video/quicktime,video/webm" onChange={uploadVideo} />
+        <input ref={fileRef} className="file-input" type="file" accept="video/mp4,video/quicktime,video/webm,video/x-matroska" onChange={uploadVideo} />
       </form>
 
       {(status === "error" || status === "blocked") && (
-        <div className="notice" role="alert"><div><strong>{status === "blocked" ? "This link needs a handoff" : "Couldn’t reach the processor"}</strong><p>{error}</p></div><button onClick={() => fileRef.current?.click()}>Upload video <span>↑</span></button></div>
+        <div className="notice" role="alert">
+          <div><strong>{status === "blocked" ? "This link needs a handoff" : "The scan couldn’t start"}</strong><p>{error}</p></div>
+          <button onClick={() => fileRef.current?.click()}>Upload video <span>↑</span></button>
+        </div>
       )}
 
-      <section className={`workspace ${status === "running" ? "is-running" : ""}`} aria-label="Video findings workspace">
-        <div className="video-column">
-          <div className="panel-heading">
-            <div><span className="step-number">01</span><div><strong>Video</strong><small>{isFixture ? "Desk setup tour · 0:31" : jobId ? `Job ${jobId.slice(0, 8)}` : "Ready for a link"}</small></div></div>
-            <span className="source-badge">{isFixture ? "Demo preview" : "Live analysis"}</span>
+      {status === "idle" && (
+        <section className="honest-empty" aria-label="How Spotted works">
+          <article><span>01</span><h2>Understands scenes</h2><p>Samples key moments and reads visual details, labels, and context.</p></article>
+          <article><span>02</span><h2>Resolves repeats</h2><p>One product card keeps every timestamp where the same item appears.</p></article>
+          <article><span>03</span><h2>Searches with evidence</h2><p>Exact matches stay separate from alternatives and possible finds.</p></article>
+        </section>
+      )}
+
+      {workspaceVisible && (
+        <section className={`workspace ${status === "running" || status === "starting" ? "is-running" : ""}`} aria-label="Video findings workspace">
+          <div className="video-column">
+            <div className="panel-heading">
+              <div><span className="step-number">01</span><div><strong>Video</strong><small>{jobId ? `${platform} · Job ${jobId.slice(0, 8)}` : "Creating secure session"}</small></div></div>
+              <span className="source-badge">Live analysis</span>
+            </div>
+            <div className="video-stage real-video-stage">
+              {jobId && <video ref={videoRef} controls playsInline preload="metadata" src={`/api/jobs/${encodeURIComponent(jobId)}/media`} onCanPlay={() => setVideoReady(true)} onTimeUpdate={(event) => { setCurrentTime(event.currentTarget.currentTime); if (activeAppearance && Math.abs(event.currentTarget.currentTime - activeAppearance.startSec) > 4) setActiveAppearance(null); }} />}
+              {!videoReady && <div className="video-loading"><div className="scan-orbit"><span>AI</span><i /><i /><i /></div><strong>Preparing playback</strong><small>The first frames will appear here.</small></div>}
+              {currentBox && videoReady && activeProduct && <div className="detection-box" style={{ left: `${currentBox.x * 100}%`, top: `${currentBox.y * 100}%`, width: `${currentBox.width * 100}%`, height: `${currentBox.height * 100}%` }}><span>{activeProduct.name} · {productPercent(activeProduct.confidence)}%</span></div>}
+            </div>
+            <div className="moments">
+              <div><span className="moment-count">{products.reduce((sum, product) => sum + product.appearances.length, 0).toString().padStart(2, "0")}</span><span>Product moments<br />across {products.length || "—"} unique finds</span></div>
+              <div className="moment-list">{products.flatMap((product) => product.appearances.map((appearance, index) => <button key={`${product.id}-${appearance.startSec}-${index}`} className={activeId === product.id && currentTime === appearance.startSec ? "active" : ""} onClick={() => seek(product, appearance)}><span>{formatTime(appearance.startSec)}</span>{product.brand || product.name}</button>))}</div>
+            </div>
           </div>
 
-          <div className="video-stage">
-            {!isFixture && jobId ? (
-              <video ref={videoRef} controls src={`/api/jobs/${encodeURIComponent(jobId)}/media`} onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)} />
+          <div className={`results-column ${mobileResults ? "mobile-open" : ""}`}>
+            <div className="panel-heading">
+              <div><span className="step-number">02</span><div><strong>Findings</strong><small>{status === "complete" ? `${products.length} unique products` : eventCopy[eventType]}</small></div></div>
+              {status === "complete" && <span className="complete-badge"><i />Complete</span>}
+            </div>
+            {status !== "complete" && products.length === 0 ? (
+              <div className="processing" aria-live="polite">
+                <div className="scan-orbit"><span>{Math.round(progress)}%</span><i /><i /><i /></div>
+                <h2>{eventCopy[eventType]}</h2>
+                <p>Verified matches will appear here as the model recognizes, groups, and checks them.</p>
+                <div className="processing-bar"><span style={{ width: `${progress}%` }} /></div>
+                <ol>{eventOrder.slice(0, -1).map((item, index) => <li className={eventHistory.includes(item) ? "done" : item === eventType ? "active" : ""} key={item}><i>{eventHistory.includes(item) ? "✓" : index + 1}</i>{eventCopy[item]}</li>)}</ol>
+              </div>
             ) : (
-              <div className="desk-scene" role="img" aria-label="Stylized desk setup video preview">
-                <div className="scene-window"><i /><i /><i /><span /></div>
-                <div className="scene-lamp"><i /><i /></div>
-                <div className="scene-monitor"><span>SPOTTED</span></div>
-                <div className="scene-keyboard" />
-                <div className="scene-headphones" />
-                <div className="scene-bottle" />
-                <div className="scene-desk" />
-                <div className="scene-light" />
+              <div className="findings-scroll">
+                <div className="results-summary"><div><strong>{mainProducts.length.toString().padStart(2, "0")}</strong><span>High-confidence<br />findings</span></div><p><i />Exact match <b>{mainProducts.filter((product) => product.matchKind === "exact").length}</b></p></div>
+                {products.length === 0 && <div className="no-findings"><h2>No confident matches</h2><p>Spotted finished the video without inventing an identification it could not support.</p></div>}
+                <div className="product-list">{mainProducts.map((product, index) => <ProductCard key={product.id} product={product} index={index} active={activeId === product.id} onSelect={() => setActiveId(product.id)} onTime={(appearance) => seek(product, appearance)} />)}</div>
+                {possibleProducts.length > 0 && <div className="possible-section"><div className="possible-title"><span>Possible finds</span><small>Lower confidence · review suggested</small></div>{possibleProducts.map((product, index) => <ProductCard key={product.id} product={product} index={mainProducts.length + index} active={activeId === product.id} onSelect={() => setActiveId(product.id)} onTime={(appearance) => seek(product, appearance)} />)}</div>}
               </div>
             )}
-            {activeProduct && status !== "running" && <div className="detection-box" style={{ left: `${activeProduct.box.x}%`, top: `${activeProduct.box.y}%`, width: `${activeProduct.box.width}%`, height: `${activeProduct.box.height}%` }}><span>{activeProduct.brand} · {Math.round(activeProduct.confidence)}%</span></div>}
-            <div className="video-topline"><span>SCENE 04</span><span>1080P</span></div>
-            {isFixture && <div className="video-controls"><button aria-label="Play demo">▶</button><div className="video-track"><span style={{ width: `${(currentTime / 31) * 100}%` }} />{fixture.map((product) => product.timestamps.map((time) => <i key={`${product.id}-${time}`} style={{ left: `${(time / 31) * 100}%` }} />))}</div><time>{formatTime(currentTime)} / 0:31</time></div>}
           </div>
+        </section>
+      )}
 
-          <div className="moments">
-            <div><span className="moment-count">{products.reduce((sum, product) => sum + product.timestamps.length, 0).toString().padStart(2, "0")}</span><span>Product moments<br />across {products.length || "—"} unique finds</span></div>
-            <div className="moment-list">{products.flatMap((product) => product.timestamps.map((time) => <button key={`${product.id}-${time}`} className={activeId === product.id && currentTime === time ? "active" : ""} onClick={() => seek(product, time)}><span>{formatTime(time)}</span>{product.brand}</button>))}</div>
-          </div>
-        </div>
-
-        <div className={`results-column ${mobileResults ? "mobile-open" : ""}`}>
-          <div className="panel-heading">
-            <div><span className="step-number">02</span><div><strong>Findings</strong><small>{status === "running" ? progressCopy[eventType] : `${products.length} unique products`}</small></div></div>
-            {status === "complete" && <span className="complete-badge"><i />Complete</span>}
-          </div>
-
-          {status === "running" ? (
-            <div className="processing" aria-live="polite">
-              <div className="scan-orbit"><span>{Math.round(progress)}%</span><i /><i /><i /></div>
-              <h2>{progressCopy[eventType]}</h2>
-              <p>Spotted is reading visual evidence, merging repeat appearances, and checking trustworthy product pages.</p>
-              <div className="processing-bar"><span style={{ width: `${progress}%` }} /></div>
-              <ol>{demoEvents.slice(0, -1).map((item, index) => <li className={index < demoEvents.indexOf(eventType) ? "done" : index === demoEvents.indexOf(eventType) ? "active" : ""} key={item}><i>{index < demoEvents.indexOf(eventType) ? "✓" : index + 1}</i>{progressCopy[item]}</li>)}</ol>
-            </div>
-          ) : (
-            <div className="findings-scroll">
-              <div className="results-summary"><div><strong>{mainProducts.length.toString().padStart(2, "0")}</strong><span>High-confidence<br />findings</span></div><p><i />Exact match <b>{mainProducts.filter((p) => p.match === "exact").length}</b></p></div>
-              <div className="product-list">
-                {mainProducts.map((product, index) => <ProductCard key={product.id} product={product} index={index} active={activeId === product.id} onSelect={() => seek(product, product.timestamps[0] ?? 0)} onTime={(time) => seek(product, time)} />)}
-              </div>
-              {possibleProducts.length > 0 && <div className="possible-section"><div className="possible-title"><span>Possible finds</span><small>Lower confidence · review suggested</small></div>{possibleProducts.map((product, index) => <ProductCard key={product.id} product={product} index={mainProducts.length + index} active={activeId === product.id} onSelect={() => seek(product, product.timestamps[0] ?? 0)} onTime={(time) => seek(product, time)} />)}</div>}
-            </div>
-          )}
-        </div>
-      </section>
-
-      <button className="mobile-toggle" onClick={() => setMobileResults((value) => !value)}>{mobileResults ? "Show video" : `Show ${products.length} findings`} <span>↗</span></button>
-
+      {workspaceVisible && <button className="mobile-toggle" onClick={() => setMobileResults((value) => !value)}>{mobileResults ? "Show video" : `Show ${products.length} findings`} <span>↗</span></button>}
       <footer><div className="logo footer-logo"><span className="logo-mark">S</span>Spotted</div><p>Products, right on cue.</p><span>Built for the OpenAI hackathon · 2026</span></footer>
     </main>
   );
 }
 
-function ProductCard({ product, index, active, onSelect, onTime }: { product: Product; index: number; active: boolean; onSelect: () => void; onTime: (time: number) => void }) {
+function ProductCard({ product, index, active, onSelect, onTime }: { product: ProductFinding; index: number; active: boolean; onSelect: () => void; onTime: (appearance: Appearance) => void }) {
+  const [imageFailed, setImageFailed] = useState(false);
+  const image = product.imageUrl || product.appearances[0]?.thumbnailUrl;
   return (
     <article className={`product-card ${active ? "active" : ""}`} onMouseEnter={onSelect}>
-      <button className={`product-visual ${product.color}`} onClick={onSelect} aria-label={`Show ${product.brand} ${product.name} in video`}><span className={`product-shape shape-${product.id}`} /><small>{(index + 1).toString().padStart(2, "0")}</small></button>
+      <button className="product-visual" onClick={onSelect} aria-label={`Show ${product.name} in video`}>
+        {image && !imageFailed ? (
+          <>
+            {/* eslint-disable-next-line @next/next/no-img-element -- product image hosts are discovered at runtime. */}
+            <img src={image} alt="" onError={() => setImageFailed(true)} />
+          </>
+        ) : <span className="product-fallback">{(product.category || product.name).charAt(0)}</span>}
+        <small>{String(index + 1).padStart(2, "0")}</small>
+      </button>
       <div className="product-copy">
-        <div className="product-meta"><span className={`match-label ${product.match}`}>{product.match}</span><span>{product.confidence}% confidence</span></div>
-        <p>{product.brand}</p><h3>{product.name}</h3><small>{product.description}</small>
-        <div className="timestamps"><span>Seen at</span>{product.timestamps.map((time) => <button key={time} onClick={() => onTime(time)}>{formatTime(time)}</button>)}</div>
+        <div className="product-meta"><span className={`match-label ${product.matchKind}`}>{product.matchKind}</span><span>{productPercent(product.confidence)}% confidence</span></div>
+        <p>{product.brand || product.category}</p><h3>{product.name}</h3><small>{product.category}{product.model ? ` · ${product.model}` : ""}</small>
+        <div className="timestamps"><span>Seen at</span>{product.appearances.map((appearance, index) => <button key={`${appearance.startSec}-${index}`} title={appearance.evidence} onClick={() => onTime(appearance)}>{formatTime(appearance.startSec)}</button>)}</div>
       </div>
-      <div className="product-shop"><strong>{product.price}</strong><small>at {product.retailer}</small><a href={product.retailerUrl} target="_blank" rel="noreferrer">View product <span>↗</span></a></div>
+      <div className="product-shop">{product.price && <strong>{product.price}</strong>}<small>{product.retailerName ? `at ${product.retailerName}` : "Match verified"}</small>{product.productUrl && <a href={product.productUrl} target="_blank" rel="noopener noreferrer">View product <span>↗</span></a>}</div>
     </article>
   );
 }

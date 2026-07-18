@@ -28,8 +28,15 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
+# env files
 .env*
+!.env.example
+.venv/
+__pycache__/
+*.py[cod]
+
+# Spotted processor working files
+/processor-data/
 
 # vercel
 .vercel

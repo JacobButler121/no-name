@@ -20,12 +20,13 @@ test("server-renders the Spotted experience", async () => {
   const html = await response.text();
   assert.match(html, /<title>Spotted — Products, right on cue\.<\/title>/i);
   assert.match(html, /Turn any video/);
-  assert.match(html, /Video link/);
-  assert.match(html, /Findings/);
+  assert.match(html, /Drop a public video link/);
+  assert.match(html, /Searches with evidence/);
+  assert.match(html, /Upload a video instead/);
   assert.doesNotMatch(html, /SceneCart|Starter Project|codex-preview/);
 });
 
-test("keeps the processor contract and demo fixture in the same UI", async () => {
+test("keeps the live processor contract and an honest empty UI", async () => {
   const [page, css] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
@@ -36,5 +37,6 @@ test("keeps the processor contract and demo fixture in the same UI", async () =>
   assert.match(page, /retrieval_blocked/);
   assert.match(page, /merging_duplicates/);
   assert.match(page, /possible/);
+  assert.doesNotMatch(page, /const\s+fixture|NuPhy|Anglepoise|WH-1000XM5/);
   assert.match(css, /prefers-reduced-motion/);
 });
