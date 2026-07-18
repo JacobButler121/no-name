@@ -12,7 +12,7 @@ Spotted never substitutes canned product results. If a social platform blocks re
 
 ## Local setup
 
-Requirements: Node.js 22+, Python 3.11+, `ffmpeg`, `ffprobe`, and `yt-dlp`.
+Requirements: Node.js 22+, Python 3.11+, `ffmpeg`, and `ffprobe`. The processor setup installs a compatible `yt-dlp` release and its YouTube challenge solver inside the project environment.
 
 ```bash
 npm install

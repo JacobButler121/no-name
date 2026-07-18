@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,6 +12,17 @@ def _binary(name: str, env_name: str) -> str:
     configured = os.environ.get(env_name)
     if configured:
         return configured
+    return shutil.which(name) or name
+
+
+def _environment_binary(name: str, env_name: str) -> str:
+    """Prefer tools installed beside the active Python interpreter."""
+    configured = os.environ.get(env_name)
+    if configured:
+        return configured
+    candidate = Path(sys.executable).with_name(name)
+    if candidate.is_file():
+        return str(candidate)
     return shutil.which(name) or name
 
 
@@ -64,7 +76,9 @@ class Settings:
     ffprobe_path: str = field(
         default_factory=lambda: _binary("ffprobe", "FFPROBE_PATH")
     )
-    ytdlp_path: str = field(default_factory=lambda: _binary("yt-dlp", "YTDLP_PATH"))
+    ytdlp_path: str = field(
+        default_factory=lambda: _environment_binary("yt-dlp", "YTDLP_PATH")
+    )
     cors_origins: tuple[str, ...] = field(default_factory=_origins)
 
 

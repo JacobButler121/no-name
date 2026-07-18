@@ -7,10 +7,12 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from processor.media.extract import FrameExtractor
 from processor.media.platforms import classify_url
 from processor.media.probe import MediaProbe
+from processor.media.retrieval import YtDlpRetriever
 from processor.storage import JobStore
 
 
@@ -41,6 +43,32 @@ class JobStoreTests(unittest.TestCase):
             store.get(job.id).updated_at = time.time() - 10
             self.assertEqual(store.cleanup_expired(), [job.id])
             self.assertFalse(job.directory.exists())
+
+
+class RetrieverTests(unittest.TestCase):
+    def test_caption_failure_does_not_discard_downloaded_video(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            video = root / "source.mp4"
+            video.write_bytes(b"video")
+            completed = subprocess.CompletedProcess(
+                args=["yt-dlp"], returncode=0, stdout=f"{video}\n", stderr=""
+            )
+            captions_blocked = subprocess.CompletedProcess(
+                args=["yt-dlp"], returncode=1, stdout="", stderr="HTTP Error 429"
+            )
+            with patch(
+                "processor.media.retrieval.subprocess.run",
+                side_effect=[completed, captions_blocked],
+            ) as run:
+                media, subtitles = YtDlpRetriever("yt-dlp").retrieve(
+                    "https://youtu.be/example", root
+                )
+
+            self.assertEqual(media, video.resolve())
+            self.assertEqual(subtitles, [])
+            self.assertEqual(run.call_count, 2)
+            self.assertIn("--js-runtimes", run.call_args_list[0].args[0])
 
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg required")

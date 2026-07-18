@@ -326,7 +326,7 @@ export default function Home() {
 
       {(status === "error" || status === "blocked") && (
         <div className="notice" role="alert">
-          <div><strong>{status === "blocked" ? "This link needs a handoff" : "The scan couldn’t start"}</strong><p>{error}</p></div>
+          <div><strong>{status === "blocked" ? "The platform blocked this link" : "The scan couldn’t start"}</strong><p>{error}</p></div>
           <button onClick={() => fileRef.current?.click()}>Upload video <span>↑</span></button>
         </div>
       )}
