@@ -526,6 +526,7 @@ export default function Home() {
               <input id="composer" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="Paste a YouTube, TikTok, or Instagram link" inputMode="url" disabled={status === "starting"} />
             </div>
           </div>
+          <span className="composer-divider" aria-hidden="true" />
           <div className="prompt-field prompt-field-focus">
             <span className="prompt-spark" aria-hidden="true">✦</span>
             <div className="prompt-copy">
