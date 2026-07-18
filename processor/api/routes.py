@@ -224,6 +224,20 @@ def create_router(store: JobStore, settings: Settings) -> APIRouter:
             raise HTTPException(status_code=404, detail="Frame not found.")
         return FileResponse(path, media_type="image/jpeg")
 
+    @router.get("/{job_id}/crops/{filename}")
+    async def get_crop(job_id: str, filename: str) -> FileResponse:
+        job = _get_job_or_404(store, job_id)
+        if not re.fullmatch(r"frame-\d{4,8}-\d+-\d+-\d+-\d+\.jpg", filename):
+            raise HTTPException(status_code=404, detail="Crop not found.")
+        path = job.directory / "frames" / "crops" / filename
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="Crop not found.")
+        return FileResponse(
+            path,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "private, max-age=300"},
+        )
+
     @router.delete("/{job_id}", status_code=204)
     async def delete_job(job_id: str) -> Response:
         if not store.delete(job_id):

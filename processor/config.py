@@ -29,7 +29,7 @@ def _environment_binary(name: str, env_name: str) -> str:
 def _origins() -> tuple[str, ...]:
     raw = os.environ.get(
         "SPOTTED_CORS_ORIGINS",
-        "http://localhost:3000,http://127.0.0.1:3000",
+        "http://localhost:3001,http://127.0.0.1:3001,http://localhost:3000,http://127.0.0.1:3000",
     )
     return tuple(value.strip() for value in raw.split(",") if value.strip())
 

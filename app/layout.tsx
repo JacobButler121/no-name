@@ -9,10 +9,10 @@ const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"]
 export async function generateMetadata(): Promise<Metadata> {
   const requestHeaders = await headers();
   const forwardedHost = requestHeaders.get("x-forwarded-host")?.split(",")[0].trim();
-  const requestHost = forwardedHost || requestHeaders.get("host") || "localhost:3000";
+  const requestHost = forwardedHost || requestHeaders.get("host") || "localhost:3001";
   const safeHost = /^[a-z0-9.-]+(?::\d+)?$/i.test(requestHost)
     ? requestHost
-    : "localhost:3000";
+    : "localhost:3001";
   const forwardedProtocol = requestHeaders.get("x-forwarded-proto")?.split(",")[0].trim();
   const protocol = forwardedProtocol === "http" || safeHost.startsWith("localhost")
     ? "http"

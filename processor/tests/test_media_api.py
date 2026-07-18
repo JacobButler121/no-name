@@ -85,6 +85,13 @@ class MediaApiTests(unittest.TestCase):
         self.assertEqual(manifest["searchFocus"], "Find all the lamps")
         thumbnail = snapshot["frames"][0]["thumbnailUrl"]
         self.assertEqual(self.client.get(thumbnail).status_code, 200)
+        crop_dir = self.store.get(job_id).directory / "frames" / "crops"
+        crop_dir.mkdir(parents=True, exist_ok=True)
+        crop_name = "frame-0001-100-200-300-400.jpg"
+        (crop_dir / crop_name).write_bytes(b"temporary-crop")
+        crop_response = self.client.get(f"/api/jobs/{job_id}/crops/{crop_name}")
+        self.assertEqual(crop_response.status_code, 200)
+        self.assertEqual(crop_response.content, b"temporary-crop")
 
         ranged = self.client.get(
             f"/api/jobs/{job_id}/media", headers={"Range": "bytes=0-31"}
