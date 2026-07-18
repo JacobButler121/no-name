@@ -138,7 +138,9 @@ class GoogleLensSearchClient:
             return []
         params = {
             "engine": "google_lens",
-            "type": "visual_matches",
+            # Product results prioritize purchasable listings while retaining
+            # the same visual_matches response shape used by SerpApi.
+            "type": "products",
             "url": image_url,
             "api_key": self.api_key,
             "country": self.country,

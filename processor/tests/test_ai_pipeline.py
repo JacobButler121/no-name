@@ -159,7 +159,7 @@ class LensClientTests(unittest.TestCase):
         self.assertTrue(result[0].exact_hint)
         query = urllib.parse.parse_qs(urllib.parse.urlparse(requests[0].full_url).query)
         self.assertEqual(query["engine"], ["google_lens"])
-        self.assertEqual(query["type"], ["visual_matches"])
+        self.assertEqual(query["type"], ["products"])
         self.assertEqual(query["q"], ["green ceramic lamp"])
 
     def test_relay_uploads_searches_and_deletes_one_crop(self) -> None:

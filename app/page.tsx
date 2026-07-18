@@ -1,11 +1,11 @@
 "use client";
 
 import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
-import { flushSync } from "react-dom";
 
 type YouTubePlayer = {
   destroy: () => void;
   getCurrentTime: () => number;
+  mute: () => void;
   playVideo: () => void;
   seekTo: (seconds: number, allowSeekAhead: boolean) => void;
 };
@@ -219,21 +219,12 @@ async function responseJson(response: Response): Promise<JobResponse> {
   }
 }
 
-type ViewTransitionDocument = Document & {
-  startViewTransition?: (update: () => void | Promise<void>) => { finished: Promise<void> };
-};
-
 function withSurfaceTransition(update: () => void): Promise<void> {
-  const transitionDocument = document as ViewTransitionDocument;
+  update();
   const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  if (!transitionDocument.startViewTransition || reduceMotion) {
-    update();
-    return Promise.resolve();
-  }
-  const transition = transitionDocument.startViewTransition(() => {
-    flushSync(update);
-  });
-  return transition.finished.catch(() => undefined);
+  return reduceMotion
+    ? Promise.resolve()
+    : new Promise((resolve) => window.setTimeout(resolve, 480));
 }
 
 export default function Home() {
@@ -252,7 +243,6 @@ export default function Home() {
   const [error, setError] = useState("");
   const [mobileResults, setMobileResults] = useState(false);
   const [videoReady, setVideoReady] = useState(false);
-  const [surfaceSettling, setSurfaceSettling] = useState(false);
   const [mediaAvailable, setMediaAvailable] = useState(false);
   const [videoDimensions, setVideoDimensions] = useState({ width: 16, height: 9 });
   const [videoRect, setVideoRect] = useState({ left: 0, top: 0, width: 0, height: 0 });
@@ -324,6 +314,7 @@ export default function Home() {
         height: "100%",
         host: "https://www.youtube-nocookie.com",
         playerVars: {
+          autoplay: 1,
           playsinline: 1,
           rel: 0,
           origin: window.location.origin,
@@ -333,6 +324,10 @@ export default function Home() {
             if (cancelled) return;
             youtubePlayerRef.current = player;
             setVideoReady(true);
+            // Muted autoplay is permitted by modern browsers and gives the user
+            // immediate playback while the backend analyzes the same source.
+            player.mute();
+            player.playVideo();
             if (pendingSeekRef.current !== null) {
               player.seekTo(pendingSeekRef.current, true);
               player.playVideo();
@@ -461,7 +456,6 @@ export default function Home() {
     if (!videoUrl) return;
     try { new URL(videoUrl); } catch { setError("Paste a complete YouTube, TikTok, or Instagram URL."); setStatus("error"); return; }
     const handoff = withSurfaceTransition(() => {
-      setSurfaceSettling(true);
       setStatus("starting");
       setEventType("retrieving_video");
       setEventHistory(["retrieving_video"]);
@@ -477,12 +471,15 @@ export default function Home() {
       setSourceUrl(videoUrl);
     });
     surfaceHandoffRef.current = handoff;
-    void handoff.finally(() => setSurfaceSettling(false));
     try {
       const response = await fetch("/api/jobs", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ url: videoUrl, focus: focus.trim() || undefined }),
+        // Job creation should return immediately. If the local processor has
+        // stopped, fail visibly instead of leaving the progress UI at its first
+        // (13%) step forever.
+        signal: AbortSignal.timeout(20_000),
       });
       const data = await responseJson(response);
       if (!response.ok) throw new Error(responseMessage(data, "The video processor is unavailable."));
@@ -491,7 +488,13 @@ export default function Home() {
       await handoff;
       await withSurfaceTransition(() => {
         setStatus("error");
-        setError(reason instanceof Error ? reason.message : "Could not start this video.");
+        setError(
+          reason instanceof DOMException && reason.name === "TimeoutError"
+            ? "The local video processor did not respond. Restart Spotted and try again."
+            : reason instanceof Error
+              ? reason.message
+              : "Could not start this video.",
+        );
       });
     }
   }
@@ -503,7 +506,6 @@ export default function Home() {
     form.append("file", file);
     if (focus.trim()) form.append("focus", focus.trim());
     const handoff = withSurfaceTransition(() => {
-      setSurfaceSettling(true);
       setStatus("starting");
       setEventType("retrieving_video");
       setEventHistory(["retrieving_video"]);
@@ -519,7 +521,6 @@ export default function Home() {
       pendingSeekRef.current = null;
     });
     surfaceHandoffRef.current = handoff;
-    void handoff.finally(() => setSurfaceSettling(false));
     try {
       const response = await fetch("/api/jobs/upload", { method: "POST", body: form });
       const data = await responseJson(response);
@@ -652,7 +653,7 @@ export default function Home() {
         )}
 
         {workspaceVisible && (
-          <section className={`workspace ${status === "running" || status === "starting" ? "is-running" : ""} ${surfaceSettling ? "is-entering" : ""}`} aria-label="Video findings workspace">
+          <section className={`workspace ${status === "running" || status === "starting" ? "is-running" : ""}`} aria-label="Video findings workspace">
           <div className="video-column">
             <div className="panel-heading">
               <div><span className="step-number">01</span><div><strong>Video</strong><small>{jobId ? `${platform} · Job ${jobId.slice(0, 8)}` : "Creating secure session"}</small></div></div>

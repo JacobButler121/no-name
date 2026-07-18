@@ -40,7 +40,6 @@ const children = [
       "-m",
       "uvicorn",
       "processor.main:app",
-      "--reload",
       "--host",
       "127.0.0.1",
       "--port",
