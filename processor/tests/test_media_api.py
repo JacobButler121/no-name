@@ -13,7 +13,7 @@ try:
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from processor.api.routes import create_router
+    from processor.api.routes import _read_vtt_segments, create_router
     from processor.config import Settings
     from processor.storage import JobStore
 
@@ -102,6 +102,17 @@ class MediaApiTests(unittest.TestCase):
             "/api/jobs", json={"url": "https://example.com/video.mp4"}
         )
         self.assertEqual(response.status_code, 422)
+
+    def test_caption_parser_preserves_timestamps(self) -> None:
+        captions = Path(self.temporary.name) / "captions.vtt"
+        captions.write_text(
+            "WEBVTT\n\n00:00:02.000 --> 00:00:05.000\nThis is the reading lamp.\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            _read_vtt_segments([captions]),
+            [{"startSec": 2.0, "endSec": 5.0, "text": "This is the reading lamp."}],
+        )
 
     def _wait_for_terminal(self, job_id: str) -> dict:
         deadline = time.monotonic() + 10

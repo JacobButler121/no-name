@@ -23,6 +23,8 @@ button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid var(-
 .honest-empty h2{margin:65px 0 9px;font-size:17px;letter-spacing:-.035em}
 .honest-empty p{max-width:290px;margin:0;color:var(--muted);font-size:11px;line-height:1.55}
 .real-video-stage video{width:100%;height:100%;display:block;object-fit:contain;background:#111}
+.youtube-player,.youtube-player iframe{width:100%;height:100%;display:block;border:0;background:#111}
+.detection-box{pointer-events:none}
 .video-loading{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#fff;background:radial-gradient(circle at 50% 40%,#32332e,#151613 66%)}
 .video-loading .scan-orbit{width:82px;height:82px;border-color:#484944}
 .video-loading .scan-orbit:before,.video-loading .scan-orbit:after{border-color:#44453f}
@@ -46,4 +48,8 @@ button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid var(-
 /* Let the findings side define the page height instead of clipping at one viewport. */
 .results-column{max-height:none;min-height:714px}
 .findings-scroll{flex:1;overflow:visible;background:var(--white)}
+.unmatched-summary{display:flex;align-items:center;justify-content:space-between;gap:28px;padding:22px 20px;border-top:9px solid var(--soft);color:var(--muted)}
+.unmatched-summary strong{color:var(--ink);font-size:11px}
+.unmatched-summary span{max-width:330px;text-align:right;font-size:9px;line-height:1.5}
 @media(max-width:900px){.results-column{height:auto;min-height:0;max-height:none}}
+@media(max-width:620px){.unmatched-summary{align-items:flex-start;flex-direction:column;gap:7px}.unmatched-summary span{text-align:left}}

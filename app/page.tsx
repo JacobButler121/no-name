@@ -2,6 +2,61 @@
 
 import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
 
+type YouTubePlayer = {
+  destroy: () => void;
+  getCurrentTime: () => number;
+  playVideo: () => void;
+  seekTo: (seconds: number, allowSeekAhead: boolean) => void;
+};
+
+type YouTubeAPI = {
+  Player: new (
+    element: HTMLElement,
+    options: {
+      videoId: string;
+      width: string;
+      height: string;
+      host?: string;
+      playerVars: Record<string, string | number>;
+      events: {
+        onReady: () => void;
+        onStateChange: (event: { data: number }) => void;
+      };
+    },
+  ) => YouTubePlayer;
+};
+
+declare global {
+  interface Window {
+    YT?: YouTubeAPI;
+    onYouTubeIframeAPIReady?: () => void;
+  }
+}
+
+let youtubeApiPromise: Promise<YouTubeAPI> | null = null;
+
+function loadYouTubeAPI(): Promise<YouTubeAPI> {
+  if (window.YT?.Player) return Promise.resolve(window.YT);
+  if (youtubeApiPromise) return youtubeApiPromise;
+  youtubeApiPromise = new Promise((resolve, reject) => {
+    const priorReady = window.onYouTubeIframeAPIReady;
+    window.onYouTubeIframeAPIReady = () => {
+      priorReady?.();
+      if (window.YT?.Player) resolve(window.YT);
+      else reject(new Error("YouTube playback could not initialize."));
+    };
+    let script = document.querySelector<HTMLScriptElement>('script[src="https://www.youtube.com/iframe_api"]');
+    if (!script) {
+      script = document.createElement("script");
+      script.src = "https://www.youtube.com/iframe_api";
+      script.async = true;
+      document.head.appendChild(script);
+    }
+    script.addEventListener("error", () => reject(new Error("YouTube playback could not load.")), { once: true });
+  });
+  return youtubeApiPromise;
+}
+
 type EventType =
   | "retrieving_video"
   | "extracting_frames"
@@ -28,6 +83,8 @@ type ProductFinding = {
   category: string;
   matchKind: "exact" | "similar" | "possible";
   confidence: number;
+  detectionConfidence?: number;
+  matchConfidence?: number;
   brand?: string;
   model?: string;
   retailerName?: string;
@@ -41,11 +98,31 @@ type JobResponse = {
   jobId?: string;
   platform?: string;
   status?: string;
+  mediaUrl?: string | null;
   findings?: ProductFinding[];
   error?: { message?: string } | string;
   message?: string;
   detail?: string;
 };
+
+function youtubeVideoId(value: string) {
+  try {
+    const parsed = new URL(value);
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+    let candidate = "";
+    if (host === "youtu.be") candidate = parsed.pathname.split("/").filter(Boolean)[0] || "";
+    if (host === "youtube.com" || host === "m.youtube.com" || host === "music.youtube.com") {
+      candidate = parsed.searchParams.get("v") || "";
+      if (!candidate) {
+        const parts = parsed.pathname.split("/").filter(Boolean);
+        if (["shorts", "embed", "live"].includes(parts[0])) candidate = parts[1] || "";
+      }
+    }
+    return /^[a-zA-Z0-9_-]{6,}$/.test(candidate) ? candidate : null;
+  } catch {
+    return null;
+  }
+}
 
 const eventOrder: EventType[] = [
   "retrieving_video",
@@ -110,6 +187,7 @@ async function responseJson(response: Response): Promise<JobResponse> {
 
 export default function Home() {
   const [url, setUrl] = useState("");
+  const [sourceUrl, setSourceUrl] = useState("");
   const [focus, setFocus] = useState("");
   const [jobId, setJobId] = useState<string | null>(null);
   const [platform, setPlatform] = useState("video");
@@ -123,17 +201,76 @@ export default function Home() {
   const [error, setError] = useState("");
   const [mobileResults, setMobileResults] = useState(false);
   const [videoReady, setVideoReady] = useState(false);
+  const [mediaAvailable, setMediaAvailable] = useState(false);
   const streamRef = useRef<EventSource | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const youtubeHostRef = useRef<HTMLDivElement>(null);
+  const youtubePlayerRef = useRef<YouTubePlayer | null>(null);
+  const pendingSeekRef = useRef<number | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  const activeProduct = products.find((product) => product.id === activeId) ?? products[0];
-  const mainProducts = products.filter((product) => product.matchKind !== "possible");
-  const possibleProducts = products.filter((product) => product.matchKind === "possible");
+  const youtubeId = platform === "youtube" ? youtubeVideoId(sourceUrl || url) : null;
+  const mainProducts = products.filter((product) => product.matchKind !== "possible" && Boolean(product.productUrl));
+  const unmatchedProducts = products.filter((product) => !product.productUrl);
+  const activeProduct = mainProducts.find((product) => product.id === activeId) ?? mainProducts[0];
   const progressIndex = eventOrder.indexOf(eventType);
   const progress = status === "complete" ? 100 : Math.max(6, ((Math.max(0, progressIndex) + 1) / eventOrder.length) * 100);
 
   useEffect(() => () => streamRef.current?.close(), []);
+
+  useEffect(() => {
+    if (!youtubeId) return;
+    let cancelled = false;
+    let poll: number | undefined;
+    const host = youtubeHostRef.current;
+    void loadYouTubeAPI().then((api) => {
+      if (cancelled || !host) return;
+      const mount = document.createElement("div");
+      host.replaceChildren(mount);
+      const player = new api.Player(mount, {
+        videoId: youtubeId,
+        width: "100%",
+        height: "100%",
+        host: "https://www.youtube-nocookie.com",
+        playerVars: {
+          playsinline: 1,
+          rel: 0,
+          origin: window.location.origin,
+        },
+        events: {
+          onReady: () => {
+            if (cancelled) return;
+            youtubePlayerRef.current = player;
+            setVideoReady(true);
+            if (pendingSeekRef.current !== null) {
+              player.seekTo(pendingSeekRef.current, true);
+              player.playVideo();
+              pendingSeekRef.current = null;
+            }
+          },
+          onStateChange: () => undefined,
+        },
+      });
+      youtubePlayerRef.current = player;
+      poll = window.setInterval(() => {
+        try {
+          const time = player.getCurrentTime();
+          if (!Number.isFinite(time)) return;
+          setCurrentTime(time);
+          setActiveAppearance((current) => current && Math.abs(time - current.startSec) > 4 ? null : current);
+        } catch { /* the player may be between states */ }
+      }, 500);
+    }).catch(() => {
+      if (!cancelled) setVideoReady(false);
+    });
+    return () => {
+      cancelled = true;
+      if (poll !== undefined) window.clearInterval(poll);
+      try { youtubePlayerRef.current?.destroy(); } catch { /* already removed */ }
+      youtubePlayerRef.current = null;
+      host?.replaceChildren();
+    };
+  }, [youtubeId]);
 
   function recordEvent(type: EventType) {
     setEventType(type);
@@ -148,7 +285,7 @@ export default function Home() {
       next[matchIndex] = product;
       return next;
     });
-    setActiveId((current) => current || product.id);
+    setActiveId((current) => current || (product.productUrl ? product.id : ""));
   }
 
   async function fetchJob(id: string) {
@@ -157,8 +294,9 @@ export default function Home() {
       const data = await responseJson(response);
       if (!response.ok) throw new Error(responseMessage(data, "Could not load the completed findings."));
       const findings = Array.isArray(data.findings) ? data.findings.filter(isFinding) : [];
+      setMediaAvailable(Boolean(data.mediaUrl));
       setProducts(findings);
-      setActiveId((current) => current || findings[0]?.id || "");
+      setActiveId((current) => current || findings.find((item) => item.productUrl)?.id || "");
       setStatus(data.status === "failed" ? "error" : "complete");
     } catch (reason) {
       setStatus("error");
@@ -169,15 +307,17 @@ export default function Home() {
   function handleServerEvent(type: EventType, raw: string, id: string) {
     let payload: Record<string, unknown> = {};
     try { payload = raw ? JSON.parse(raw) : {}; } catch { /* named event can have no JSON body */ }
+    const eventMessage = typeof payload.message === "string" ? payload.message : "";
     recordEvent(type);
+    if (type === "extracting_frames") setMediaAvailable(true);
     if (type === "product_ready" && isFinding(payload)) addFinding(payload);
     if (type === "retrieval_blocked") {
       setStatus("blocked");
-      setError(typeof payload.message === "string" ? payload.message : "This platform did not provide the video. Upload the file to continue.");
+      setError(eventMessage || "This platform did not provide the video. Upload the file to continue.");
       streamRef.current?.close();
     } else if (type === "failed") {
       setStatus("error");
-      setError(typeof payload.message === "string" ? payload.message : "The processor could not finish this video.");
+      setError(eventMessage || "The processor could not finish this video.");
       streamRef.current?.close();
     } else if (type === "completed") {
       setStatus("complete");
@@ -207,6 +347,7 @@ export default function Home() {
     if (!data.jobId) throw new Error("The processor did not return a job ID.");
     setJobId(data.jobId);
     setPlatform(data.platform || "video");
+    setMediaAvailable(Boolean(data.mediaUrl));
     setStatus("running");
     connectEvents(data.jobId);
   }
@@ -225,6 +366,9 @@ export default function Home() {
     setError("");
     setMobileResults(false);
     setVideoReady(false);
+    setMediaAvailable(false);
+    pendingSeekRef.current = null;
+    setSourceUrl(videoUrl);
     try {
       const response = await fetch("/api/jobs", {
         method: "POST",
@@ -254,7 +398,10 @@ export default function Home() {
     setActiveAppearance(null);
     setError("");
     setPlatform("upload");
+    setSourceUrl("");
     setVideoReady(false);
+    setMediaAvailable(false);
+    pendingSeekRef.current = null;
     try {
       const response = await fetch("/api/jobs/upload", { method: "POST", body: form });
       const data = await responseJson(response);
@@ -280,6 +427,9 @@ export default function Home() {
     setCurrentTime(0);
     setError("");
     setVideoReady(false);
+    setMediaAvailable(false);
+    pendingSeekRef.current = null;
+    setSourceUrl("");
     if (id) {
       try { await fetch(`/api/jobs/${encodeURIComponent(id)}`, { method: "DELETE", keepalive: true }); } catch { /* jobs also expire */ }
     }
@@ -290,6 +440,16 @@ export default function Home() {
     setActiveAppearance(appearance);
     setCurrentTime(appearance.startSec);
     setMobileResults(false);
+    if (youtubeId) {
+      const player = youtubePlayerRef.current;
+      if (player) {
+        player.seekTo(appearance.startSec, true);
+        player.playVideo();
+      } else {
+        pendingSeekRef.current = appearance.startSec;
+      }
+      return;
+    }
     if (videoRef.current) {
       const duration = videoRef.current.duration;
       const target = Number.isFinite(duration)
@@ -366,22 +526,30 @@ export default function Home() {
               <span className="source-badge">{focus.trim() ? "Focused analysis" : "Live analysis"}</span>
             </div>
             <div className="video-stage real-video-stage">
-              {jobId && <video ref={videoRef} controls playsInline preload="metadata" src={`/api/jobs/${encodeURIComponent(jobId)}/media`} onCanPlay={() => setVideoReady(true)} onTimeUpdate={(event) => { setCurrentTime(event.currentTarget.currentTime); if (activeAppearance && Math.abs(event.currentTarget.currentTime - activeAppearance.startSec) > 4) setActiveAppearance(null); }} />}
+              {youtubeId ? (
+                <div
+                  ref={youtubeHostRef}
+                  className="youtube-player"
+                  aria-label="YouTube video player"
+                />
+              ) : jobId && mediaAvailable ? (
+                <video ref={videoRef} controls playsInline preload="metadata" src={`/api/jobs/${encodeURIComponent(jobId)}/media`} onCanPlay={() => setVideoReady(true)} onTimeUpdate={(event) => { setCurrentTime(event.currentTarget.currentTime); if (activeAppearance && Math.abs(event.currentTarget.currentTime - activeAppearance.startSec) > 4) setActiveAppearance(null); }} />
+              ) : null}
               {!videoReady && <div className="video-loading"><div className="scan-orbit"><span>AI</span><i /><i /><i /></div><strong>Preparing playback</strong><small>The first frames will appear here.</small></div>}
               {currentBox && videoReady && activeProduct && <div className="detection-box" style={{ left: `${currentBox.x * 100}%`, top: `${currentBox.y * 100}%`, width: `${currentBox.width * 100}%`, height: `${currentBox.height * 100}%` }}><span>{activeProduct.name} · {productPercent(activeProduct.confidence)}%</span></div>}
             </div>
             <div className="moments">
-              <div><span className="moment-count">{products.reduce((sum, product) => sum + product.appearances.length, 0).toString().padStart(2, "0")}</span><span>Product moments<br />across {products.length || "—"} unique finds</span></div>
-              <div className="moment-list">{products.flatMap((product) => product.appearances.map((appearance, index) => <button key={`${product.id}-${appearance.startSec}-${index}`} className={activeId === product.id && Math.abs(currentTime - appearance.startSec) < 0.75 ? "active" : ""} onClick={() => seek(product, appearance)}><span>{formatTime(appearance.startSec)}</span>{product.brand || product.name}</button>))}</div>
+              <div><span className="moment-count">{mainProducts.reduce((sum, product) => sum + product.appearances.length, 0).toString().padStart(2, "0")}</span><span>Matched moments<br />across {mainProducts.length || "—"} verified finds</span></div>
+              <div className="moment-list">{mainProducts.flatMap((product) => product.appearances.map((appearance, index) => <button key={`${product.id}-${appearance.startSec}-${index}`} className={activeId === product.id && Math.abs(currentTime - appearance.startSec) < 0.75 ? "active" : ""} onClick={() => seek(product, appearance)}><span>{formatTime(appearance.startSec)}</span>{product.brand || product.name}</button>))}</div>
             </div>
           </div>
 
           <div className={`results-column ${mobileResults ? "mobile-open" : ""}`}>
             <div className="panel-heading">
-              <div><span className="step-number">02</span><div><strong>Findings</strong><small>{status === "complete" ? `${products.length} unique products` : eventCopy[eventType]}</small></div></div>
+              <div><span className="step-number">02</span><div><strong>Findings</strong><small>{status === "complete" ? `${mainProducts.length} verified products` : eventCopy[eventType]}</small></div></div>
               {status === "complete" && <span className="complete-badge"><i />Complete</span>}
             </div>
-            {status !== "complete" && products.length === 0 ? (
+            {status !== "complete" && mainProducts.length === 0 ? (
               <div className="processing" aria-live="polite">
                 <div className="scan-orbit"><span>{Math.round(progress)}%</span><i /><i /><i /></div>
                 <h2>{eventCopy[eventType]}</h2>
@@ -391,17 +559,17 @@ export default function Home() {
               </div>
             ) : (
               <div className="findings-scroll">
-                <div className="results-summary"><div><strong>{mainProducts.length.toString().padStart(2, "0")}</strong><span>High-confidence<br />findings</span></div><p><i />Exact match <b>{mainProducts.filter((product) => product.matchKind === "exact").length}</b></p></div>
-                {products.length === 0 && <div className="no-findings"><h2>No confident matches</h2><p>Spotted finished the video without inventing an identification it could not support.</p></div>}
+                <div className="results-summary"><div><strong>{mainProducts.length.toString().padStart(2, "0")}</strong><span>Verified shopping<br />matches</span></div><p><i />Exact match <b>{mainProducts.filter((product) => product.matchKind === "exact").length}</b></p></div>
+                {mainProducts.length === 0 && <div className="no-findings"><h2>No verified shopping matches</h2><p>Spotted detected objects, but none passed both retailer-page and visual verification.</p></div>}
                 <div className="product-list">{mainProducts.map((product, index) => <ProductCard key={product.id} product={product} index={index} active={activeId === product.id} onSelect={() => setActiveId(product.id)} onTime={(appearance) => seek(product, appearance)} />)}</div>
-                {possibleProducts.length > 0 && <div className="possible-section"><div className="possible-title"><span>Possible finds</span><small>Lower confidence · review suggested</small></div>{possibleProducts.map((product, index) => <ProductCard key={product.id} product={product} index={mainProducts.length + index} active={activeId === product.id} onSelect={() => setActiveId(product.id)} onTime={(appearance) => seek(product, appearance)} />)}</div>}
+                {unmatchedProducts.length > 0 && <div className="unmatched-summary"><strong>{unmatchedProducts.length} additional {unmatchedProducts.length === 1 ? "object was" : "objects were"} detected</strong><span>No retailer match passed visual verification, so {unmatchedProducts.length === 1 ? "it is" : "they are"} not shown as shopping results.</span></div>}
               </div>
             )}
           </div>
         </section>
       )}
 
-      {workspaceVisible && <button className="mobile-toggle" onClick={() => setMobileResults((value) => !value)}>{mobileResults ? "Show video" : `Show ${products.length} findings`} <span>↗</span></button>}
+      {workspaceVisible && <button className="mobile-toggle" onClick={() => setMobileResults((value) => !value)}>{mobileResults ? "Show video" : `Show ${mainProducts.length} matches`} <span>↗</span></button>}
       <footer><div className="logo footer-logo"><span className="logo-mark">S</span>Spotted</div><p>Products, right on cue.</p><span>Built for the OpenAI hackathon · 2026</span></footer>
     </main>
   );
@@ -422,11 +590,11 @@ function ProductCard({ product, index, active, onSelect, onTime }: { product: Pr
         <small>{String(index + 1).padStart(2, "0")}</small>
       </button>
       <div className="product-copy">
-        <div className="product-meta"><span className={`match-label ${product.matchKind}`}>{product.matchKind}</span><span>{productPercent(product.confidence)}% confidence</span></div>
+        <div className="product-meta"><span className={`match-label ${product.matchKind}`}>{product.matchKind}</span><span>{productPercent(product.matchConfidence ?? product.confidence)}% match confidence</span></div>
         <p>{product.brand || product.category}</p><h3>{product.name}</h3><small>{product.category}{product.model ? ` · ${product.model}` : ""}</small>
         <div className="timestamps"><span>Seen at</span>{product.appearances.map((appearance, index) => <button key={`${appearance.startSec}-${index}`} title={appearance.evidence} onClick={() => onTime(appearance)}>{formatTime(appearance.startSec)}</button>)}</div>
       </div>
-      <div className="product-shop">{product.price && <strong>{product.price}</strong>}<small>{product.retailerName ? `at ${product.retailerName}` : "Match verified"}</small>{product.productUrl && <a href={product.productUrl} target="_blank" rel="noopener noreferrer">View product <span>↗</span></a>}</div>
+      <div className="product-shop">{product.price && <strong>{product.price}</strong>}<small>{product.retailerName ? `at ${product.retailerName}` : "Verified retailer"}</small>{product.productUrl && <a href={product.productUrl} target="_blank" rel="noopener noreferrer">View product <span>↗</span></a>}</div>
     </article>
   );
 }
