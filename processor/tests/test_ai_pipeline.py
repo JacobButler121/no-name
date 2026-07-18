@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from processor.ai.client import OpenAIResponsesClient
 from processor.ai.dedupe import deduplicate_candidates
-from processor.ai.pipeline import ProductAnalysisPipeline, _select_candidates
+from processor.ai.pipeline import ProductAnalysisPipeline, SYSTEM_PROMPT, _select_candidates
 from processor.models import (
     AnalysisConfigurationError,
     Appearance,
@@ -99,6 +99,10 @@ class ModelContractTests(unittest.TestCase):
 
 
 class DedupeTests(unittest.TestCase):
+    def test_extended_shopping_categories_are_explicit_detection_targets(self) -> None:
+        for category in ("watches", "clothing", "shoes", "tools"):
+            self.assertIn(category, SYSTEM_PROMPT.lower())
+
     def test_same_brand_model_merges_and_preserves_timestamps(self) -> None:
         first = candidate("first", timestamp=1.0, confidence=0.81)
         second = candidate("second", name="Sony XM5 wireless headphones", timestamp=12.0, confidence=0.94)

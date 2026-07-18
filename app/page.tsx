@@ -510,34 +510,41 @@ export default function Home() {
     <main className="app-shell">
       <header className="topbar">
         <button className="logo logo-button" type="button" onClick={() => void newSearch()} aria-label="Spotted home"><span className="logo-mark">S</span>Spotted</button>
-        <div className="topbar-center"><span className="live-dot" />AI product discovery</div>
         <button className="header-action" onClick={() => void newSearch()}>New search <span>＋</span></button>
       </header>
 
       <section className="intro" id="top">
-        <div><p className="kicker">Shop what you watch</p><h1>Spot it in a video.<br /><em>Find it online.</em></h1></div>
-        <p className="intro-note">Spotted studies the scenes, identifies what matters, and finds the closest products you can actually buy.</p>
+        <h1>Spot it. Buy it.</h1>
       </section>
 
       <form className="composer" onSubmit={submitUrl}>
-        <label htmlFor="composer">Drop a public video link</label>
-        <div className="composer-row">
-          <span className="composer-icon">↗</span>
-          <input id="composer" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="YouTube, TikTok, or Instagram URL" inputMode="url" disabled={status === "starting"} />
-          <button type="submit" disabled={!url.trim() || status === "starting"}>{status === "starting" ? "Starting" : "Find products"}<span>→</span></button>
-        </div>
-        <div className="focus-row">
-          <span className="focus-icon">✦</span>
-          <label htmlFor="search-focus">What should Spotted look for?</label>
-          <input
-            id="search-focus"
-            value={focus}
-            onChange={(event) => setFocus(event.target.value)}
-            placeholder="Optional — e.g. Find all the lamps in this video"
-            disabled={status === "starting"}
-            maxLength={500}
-          />
-          <span className="focus-mode">{focus.trim() ? "Focused scan" : "Find everything"}</span>
+        <div className="composer-fields">
+          <div className="prompt-field prompt-field-url">
+            <button className="prompt-plus" type="button" onClick={() => fileRef.current?.click()} aria-label="Upload a video">＋</button>
+            <div className="prompt-copy">
+              <label htmlFor="composer">Video link</label>
+              <input id="composer" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="Paste a YouTube, TikTok, or Instagram link" inputMode="url" disabled={status === "starting"} />
+            </div>
+          </div>
+          <div className="prompt-field prompt-field-focus">
+            <span className="prompt-spark" aria-hidden="true">✦</span>
+            <div className="prompt-copy">
+              <label htmlFor="search-focus">What should Spotted look for?</label>
+              <input
+                id="search-focus"
+                value={focus}
+                onChange={(event) => setFocus(event.target.value)}
+                placeholder="Everything — or watches, shoes, tools…"
+                disabled={status === "starting"}
+                maxLength={500}
+              />
+            </div>
+            <span className="prompt-mode">{focus.trim() ? "Focused" : "Everything"}</span>
+          </div>
+          <button className="composer-submit" type="submit" disabled={!url.trim() || status === "starting"} aria-label={status === "starting" ? "Starting product scan" : "Find products"}>
+            <span className="composer-submit-label">{status === "starting" ? "Starting" : "Find products"}</span>
+            <span aria-hidden="true">→</span>
+          </button>
         </div>
         <div className="composer-meta">
           <div className="platforms"><span>YouTube</span><i /><span>TikTok</span><i /><span>Instagram</span></div>
@@ -613,7 +620,7 @@ export default function Home() {
       )}
 
       {workspaceVisible && <button className="mobile-toggle" onClick={() => setMobileResults((value) => !value)}>{mobileResults ? "Show video" : `Show ${mainProducts.length} matches`} <span>↗</span></button>}
-      <footer><div className="logo footer-logo"><span className="logo-mark">S</span>Spotted</div><p>Products, right on cue.</p><span>Built for the OpenAI hackathon · 2026</span></footer>
+      <footer><div className="logo footer-logo"><span className="logo-mark">S</span>Spotted</div><p>Spotted studies the scenes, identifies what matters, and finds the closest products you can actually buy.</p><span>Built for the OpenAI hackathon · 2026</span></footer>
     </main>
   );
 }

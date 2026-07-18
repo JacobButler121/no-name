@@ -13,6 +13,15 @@ _CATEGORY_FAMILIES = {
     "lighting": {"lamp", "light", "lighting", "sconce", "chandelier", "pendant"},
     "headphones": {"headphone", "headphones", "headset", "earbuds"},
     "shoes": {"shoe", "shoes", "sneaker", "sneakers", "boot", "boots"},
+    "watches": {"watch", "watches", "wristwatch", "smartwatch", "timepiece"},
+    "clothing": {
+        "apparel", "garment", "shirt", "blouse", "jacket", "coat", "dress",
+        "pants", "trousers", "jeans", "sweater", "hoodie", "shorts", "skirt",
+    },
+    "tools": {
+        "tool", "tools", "drill", "saw", "hammer", "wrench", "spanner",
+        "screwdriver", "driver", "pliers", "level", "sander",
+    },
     "seating": {"chair", "chairs", "stool", "sofa", "couch", "bench"},
 }
 _GENERIC_MATERIALS = {"material", "mixed", "metal", "wood", "plastic"}

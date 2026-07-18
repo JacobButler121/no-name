@@ -18,9 +18,11 @@ test("server-renders the Spotted experience", async () => {
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   const html = await response.text();
-  assert.match(html, /<title>Spotted — Products, right on cue\.<\/title>/i);
-  assert.match(html, /Turn any video/);
-  assert.match(html, /Drop a public video link/);
+  assert.match(html, /<title>Spotted — Spot it\. Buy it\.<\/title>/i);
+  assert.match(html, /Spot it\. Buy it\./);
+  assert.match(html, /Paste a YouTube, TikTok, or Instagram link/);
+  assert.match(html, /What should Spotted look for\?/);
+  assert.doesNotMatch(html, /AI product discovery|Shop what you watch/);
   assert.match(html, /Searches with evidence/);
   assert.match(html, /Upload a video instead/);
   assert.doesNotMatch(html, /SceneCart|Starter Project|codex-preview/);
