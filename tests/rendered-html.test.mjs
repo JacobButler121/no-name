@@ -34,6 +34,12 @@ test("keeps the live processor contract and an honest empty UI", async () => {
   assert.match(page, /fetch\("\/api\/jobs"/);
   assert.match(page, /\/api\/jobs\/upload/);
   assert.match(page, /EventSource/);
+  assert.match(page, /youtube\.com\/iframe_api/);
+  assert.match(page, /youtube-nocookie\.com/);
+  assert.match(page, /seekTo/);
+  assert.match(page, /verified products/);
+  assert.match(page, /not shown as shopping results/);
+  assert.doesNotMatch(page, /Possible finds/);
   assert.match(page, /retrieval_blocked/);
   assert.match(page, /merging_duplicates/);
   assert.match(page, /possible/);

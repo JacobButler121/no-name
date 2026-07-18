@@ -25,6 +25,7 @@ class CreateJobRequest(BaseModel):
 
 
 _RANGE_PATTERN = re.compile(r"bytes=(\d*)-(\d*)$")
+_VTT_TIME_PATTERN = re.compile(r"(?:(\d+):)?(\d{2}):(\d{2}(?:\.\d+)?)")
 
 
 def create_router(store: JobStore, settings: Settings) -> APIRouter:
@@ -293,9 +294,9 @@ def _add_manifest_context(
         manifest["sourceUrl"] = source_url
     if search_focus:
         manifest["searchFocus"] = search_focus
-    transcript = _read_vtt_transcript(subtitle_paths)
-    if transcript:
-        manifest["transcript"] = transcript
+    caption_segments = _read_vtt_segments(subtitle_paths)
+    if caption_segments:
+        manifest["captionSegments"] = caption_segments
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
 
@@ -306,30 +307,49 @@ def _clean_focus(value: str | None) -> str | None:
     return cleaned or None
 
 
-def _read_vtt_transcript(paths: list[Path], *, limit: int = 50_000) -> str:
-    lines: list[str] = []
-    previous = ""
+def _vtt_seconds(value: str) -> float | None:
+    match = _VTT_TIME_PATTERN.search(value)
+    if not match:
+        return None
+    hours, minutes, seconds = match.groups()
+    return int(hours or 0) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def _read_vtt_segments(paths: list[Path], *, limit: int = 2_000) -> list[dict[str, object]]:
+    """Read one caption track and retain cue timing for frame-local context."""
     for path in paths:
         try:
             raw_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
             continue
-        for raw_line in raw_lines:
-            line = re.sub(r"<[^>]+>", "", raw_line).strip()
-            if (
-                not line
-                or line == "WEBVTT"
-                or "-->" in line
-                or line.startswith(("NOTE", "Kind:", "Language:"))
-                or line.isdigit()
-                or line == previous
-            ):
+        segments: list[dict[str, object]] = []
+        index = 0
+        seen: set[tuple[float, float, str]] = set()
+        while index < len(raw_lines) and len(segments) < limit:
+            timing = raw_lines[index].strip()
+            if "-->" not in timing:
+                index += 1
                 continue
-            lines.append(line)
-            previous = line
-            if sum(len(item) + 1 for item in lines) >= limit:
-                return "\n".join(lines)[:limit]
-    return "\n".join(lines)[:limit]
+            start_raw, end_raw = timing.split("-->", 1)
+            start_sec, end_sec = _vtt_seconds(start_raw), _vtt_seconds(end_raw)
+            index += 1
+            text_lines: list[str] = []
+            while index < len(raw_lines) and raw_lines[index].strip() and "-->" not in raw_lines[index]:
+                line = re.sub(r"<[^>]+>", "", raw_lines[index]).strip()
+                if line and not line.isdigit():
+                    text_lines.append(line)
+                index += 1
+            text = " ".join(dict.fromkeys(text_lines)).strip()
+            if start_sec is None or end_sec is None or not text:
+                continue
+            key = (start_sec, end_sec, text)
+            if key in seen:
+                continue
+            seen.add(key)
+            segments.append({"startSec": start_sec, "endSec": end_sec, "text": text})
+        if segments:
+            return segments
+    return []
 
 
 def _range_response(request: Request, path: Path, media_type: str) -> Response:

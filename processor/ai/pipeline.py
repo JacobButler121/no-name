@@ -3,13 +3,13 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
-import re
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from processor.models import (
     AnalysisError,
     Appearance,
+    CaptionSegment,
     FrameManifest,
     FrameSample,
     ProductCandidate,
@@ -37,6 +37,7 @@ DETECTION_SCHEMA: dict[str, Any] = {
                     "model": {"type": ["string", "null"]},
                     "color": {"type": ["string", "null"]},
                     "material": {"type": ["string", "null"]},
+                    "visualDescription": {"type": "string"},
                     "visibleText": {"type": "array", "items": {"type": "string"}},
                     "instanceKey": {"type": ["string", "null"]},
                     "confidence": {"type": "number", "minimum": 0, "maximum": 1},
@@ -45,8 +46,7 @@ DETECTION_SCHEMA: dict[str, Any] = {
                         "items": {
                             "type": "object",
                             "properties": {
-                                "startSec": {"type": "number", "minimum": 0},
-                                "endSec": {"type": ["number", "null"], "minimum": 0},
+                                "frameIndex": {"type": "integer", "minimum": 0, "maximum": 19},
                                 "evidence": {"type": "string"},
                                 "boundingBox": {
                                     "anyOf": [
@@ -65,7 +65,7 @@ DETECTION_SCHEMA: dict[str, Any] = {
                                     ]
                                 },
                             },
-                            "required": ["startSec", "endSec", "evidence", "boundingBox"],
+                            "required": ["frameIndex", "evidence", "boundingBox"],
                             "additionalProperties": False,
                         },
                     },
@@ -77,6 +77,7 @@ DETECTION_SCHEMA: dict[str, Any] = {
                     "model",
                     "color",
                     "material",
+                    "visualDescription",
                     "visibleText",
                     "instanceKey",
                     "confidence",
@@ -102,12 +103,20 @@ Only state a brand or model when supported by readable text, a distinctive desig
 the transcript. Use null rather than guessing. Use a useful generic name when the exact
 SKU is unknown. Confidence measures identity certainty, not visual prominence. A
 generic-but-certain category can have moderate confidence, but an exact SKU needs
-specific evidence. Include normalized 0..1 bounding boxes where possible.
+specific evidence. Include normalized 0..1 bounding boxes where possible. For every
+candidate, write a compact visualDescription of the observed object: silhouette,
+proportions, geometry, finish, colors, materials, hardware, and distinctive details.
+Describe only what is visible; do not turn this description into a guessed catalog name.
 
 The same physical item across frames must use the same short instanceKey. Different
 physical instances—even visually similar ones—must use different instanceKeys. Return
-every appearance timestamp represented in this batch. Evidence must briefly describe
-what is actually visible or spoken. Do not invent shopping links or prices."""
+every frameIndex where it appears in this batch. frameIndex must be copied from the
+label immediately before the corresponding image; never calculate or invent a timestamp.
+Evidence must briefly describe
+what is actually visible or spoken. Return exactly one candidate per physical object;
+never return multiple possible brand or retailer identities for one object. Detection
+names describe what is visible and must not look like guessed catalog listings. Do not
+invent shopping links or prices."""
 
 
 def _emit(callback: EventCallback | None, event_type: str, payload: dict[str, Any]) -> None:
@@ -126,10 +135,6 @@ def _image_input(frame: FrameSample) -> str:
     return f"data:{mime_type};base64,{encoded}"
 
 
-def _closest_frame(frames: Sequence[FrameSample], timestamp: float) -> FrameSample:
-    return min(frames, key=lambda frame: abs(frame.timestamp_sec - timestamp))
-
-
 class ProductAnalysisPipeline:
     def __init__(
         self,
@@ -137,7 +142,9 @@ class ProductAnalysisPipeline:
         client: OpenAIResponsesClient | None = None,
         batch_size: int = 10,
         detail: str = "high",
-        min_confidence: float = 0.5,
+        min_confidence: float = 0.7,
+        focused_limit: int = 8,
+        broad_limit: int = 12,
     ) -> None:
         if not 1 <= batch_size <= 20:
             raise ValueError("batch_size must be between 1 and 20")
@@ -147,6 +154,8 @@ class ProductAnalysisPipeline:
         self.batch_size = batch_size
         self.detail = detail
         self.min_confidence = min_confidence
+        self.focused_limit = focused_limit
+        self.broad_limit = broad_limit
 
     def analyze(
         self,
@@ -172,7 +181,7 @@ class ProductAnalysisPipeline:
             )
             batch_candidates = self._analyze_batch(
                 frames,
-                parsed.transcript,
+                parsed.caption_segments,
                 parsed.search_focus,
                 batch_index,
             )
@@ -189,33 +198,61 @@ class ProductAnalysisPipeline:
                         "appearances": [appearance.to_dict() for appearance in item.appearances],
                     },
                 )
-        _emit(event_callback, "merging_duplicates", {"candidateCount": len(candidates)})
-        return deduplicate_candidates(candidates)
+        merged = deduplicate_candidates(candidates)
+        selected = _select_candidates(
+            merged,
+            limit=self.focused_limit if parsed.search_focus else self.broad_limit,
+        )
+        _emit(
+            event_callback,
+            "merging_duplicates",
+            {
+                "candidateCount": len(candidates),
+                "mergedCount": len(merged),
+                "selectedCount": len(selected),
+            },
+        )
+        return selected
 
     def _analyze_batch(
         self,
         frames: Sequence[FrameSample],
-        transcript: str | None,
+        caption_segments: Sequence[CaptionSegment],
         search_focus: str | None,
         batch_index: int,
     ) -> list[ProductCandidate]:
+        local_captions = _captions_for_range(
+            caption_segments,
+            frames[0].timestamp_sec,
+            frames[-1].timestamp_sec,
+        )
         content: list[dict[str, Any]] = [
             {
                 "type": "input_text",
                 "text": (
-                    "Analyze this ordered frame batch. The timestamp written before each image is authoritative.\n"
+                    "Analyze this ordered frame batch. Each FRAME_INDEX label maps exactly to the following image. "
+                    "Return that frameIndex for every appearance; the server owns timestamps.\n"
                     + (
                         f"SEARCH FOCUS: {search_focus}. Return only physical products that match this request. "
                         "Treat plurals, synonyms, styles, and closely related subcategories as matches.\n"
                         if search_focus
                         else "SEARCH FOCUS: none. Return all defensible shoppable products.\n"
                     )
-                    + (f"Video transcript/captions (may span outside this batch):\n{transcript[:12000]}" if transcript else "No transcript is available.")
+                    + (
+                        f"Timestamp-aligned captions for only this frame window:\n{local_captions}"
+                        if local_captions
+                        else "No timestamp-aligned captions are available for this frame window."
+                    )
                 ),
             }
         ]
-        for frame in frames:
-            content.append({"type": "input_text", "text": f"FRAME timestampSec={frame.timestamp_sec:.3f}"})
+        for frame_index, frame in enumerate(frames):
+            content.append(
+                {
+                    "type": "input_text",
+                    "text": f"FRAME_INDEX={frame_index} timestampSec={frame.timestamp_sec:.3f}",
+                }
+            )
             content.append({"type": "input_image", "image_url": _image_input(frame), "detail": self.detail})
         payload = {
             "instructions": SYSTEM_PROMPT,
@@ -238,28 +275,83 @@ class ProductAnalysisPipeline:
         for index, raw in enumerate(raw_candidates, start=1):
             if not isinstance(raw, Mapping):
                 raise AnalysisError("Detection candidate must be an object")
-            candidate = ProductCandidate.from_dict(raw, fallback_id=f"batch-{batch_index}-candidate-{index}")
+            normalized_appearances: list[dict[str, Any]] = []
+            raw_appearances = raw.get("appearances")
+            if isinstance(raw_appearances, list):
+                for raw_appearance in raw_appearances:
+                    if not isinstance(raw_appearance, Mapping):
+                        continue
+                    frame_index = raw_appearance.get("frameIndex")
+                    if not isinstance(frame_index, int) or not 0 <= frame_index < len(frames):
+                        continue
+                    frame = frames[frame_index]
+                    normalized_appearances.append(
+                        {
+                            "startSec": frame.timestamp_sec,
+                            "evidence": raw_appearance.get("evidence", "Visible in sampled frame"),
+                            "boundingBox": raw_appearance.get("boundingBox"),
+                            "thumbnailUrl": frame.thumbnail_url,
+                            "sourcePath": frame.path,
+                        }
+                    )
+            normalized_raw = dict(raw)
+            normalized_raw["appearances"] = normalized_appearances
+            candidate = ProductCandidate.from_dict(
+                normalized_raw,
+                fallback_id=f"batch-{batch_index}-candidate-{index}",
+            )
             if candidate.confidence < self.min_confidence:
                 continue
-            enriched: list[Appearance] = []
-            for appearance in candidate.appearances:
-                closest = _closest_frame(frames, appearance.start_sec)
-                # Do not let a hallucinated timestamp escape far outside the supplied batch.
-                if abs(closest.timestamp_sec - appearance.start_sec) > max(5.0, frames[-1].timestamp_sec - frames[0].timestamp_sec):
-                    continue
-                enriched.append(
-                    Appearance(
-                        start_sec=closest.timestamp_sec,
-                        end_sec=appearance.end_sec,
-                        thumbnail_url=appearance.thumbnail_url or closest.thumbnail_url,
-                        bounding_box=appearance.bounding_box,
-                        evidence=appearance.evidence,
-                    )
-                )
-            candidate.appearances = enriched
             if candidate.appearances:
                 candidates.append(candidate)
         return candidates
+
+
+def _captions_for_range(
+    segments: Sequence[CaptionSegment], start_sec: float, end_sec: float
+) -> str:
+    relevant = [
+        segment.text
+        for segment in segments
+        if segment.end_sec >= start_sec - 3 and segment.start_sec <= end_sec + 3
+    ]
+    return " ".join(dict.fromkeys(relevant))[:4_000]
+
+
+def _select_candidates(
+    candidates: Sequence[ProductCandidate], *, limit: int
+) -> list[ProductCandidate]:
+    """Prefer defensible physical-object tracks over one-frame guesses.
+
+    A candidate must either recur in at least two sampled frames or carry real
+    identifying evidence. This intentionally favors precision for shopping:
+    missing an ambiguous background object is better than presenting a random
+    retailer result as though it were the object in the video.
+    """
+
+    def has_identity(candidate: ProductCandidate) -> bool:
+        return bool(
+            (candidate.brand and candidate.model)
+            or any(len(value.strip()) >= 3 for value in candidate.visible_text)
+        )
+
+    defensible = [
+        candidate
+        for candidate in candidates
+        if len({appearance.start_sec for appearance in candidate.appearances}) >= 2
+        or has_identity(candidate)
+    ]
+
+    def score(candidate: ProductCandidate) -> tuple[float, int, float]:
+        sightings = len({appearance.start_sec for appearance in candidate.appearances})
+        identity_bonus = 0.2 if candidate.brand and candidate.model else 0.08 if candidate.visible_text else 0.0
+        return (
+            candidate.confidence + min(sightings, 5) * 0.05 + identity_bonus,
+            sightings,
+            candidate.confidence,
+        )
+
+    return sorted(defensible, key=score, reverse=True)[: max(1, limit)]
 
 
 def analyze_manifest(
@@ -291,28 +383,6 @@ def analyze_and_enrich(
     )
 
 
-def _caption_text(paths: Sequence[str]) -> str | None:
-    chunks: list[str] = []
-    for raw_path in paths:
-        path = Path(raw_path)
-        if not path.is_file():
-            continue
-        text = path.read_text(encoding="utf-8", errors="replace")
-        for line in text.splitlines():
-            stripped = re.sub(r"<[^>]+>", "", line).strip()
-            if (
-                not stripped
-                or stripped.upper() == "WEBVTT"
-                or stripped.isdigit()
-                or "-->" in stripped
-                or stripped.startswith(("NOTE", "STYLE", "REGION"))
-            ):
-                continue
-            chunks.append(stripped)
-    compact = " ".join(dict.fromkeys(chunks))
-    return compact[:12000] or None
-
-
 def process_job(*, job_id: str, manifest_path: Path, store: Any) -> list[ProductFinding]:
     """Media-worker boundary: analyze a manifest, persist findings, and complete.
 
@@ -323,13 +393,6 @@ def process_job(*, job_id: str, manifest_path: Path, store: Any) -> list[Product
         manifest_data = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise AnalysisError(f"Unable to read frame manifest: {exc}") from exc
-    job = store.get(job_id)
-    if not manifest_data.get("transcript"):
-        captions = job.metadata.get("captions", []) if isinstance(job.metadata, Mapping) else []
-        transcript = _caption_text([str(item) for item in captions])
-        if transcript:
-            manifest_data["transcript"] = transcript
-
     def emit(event_type: str, payload: dict[str, Any]) -> None:
         store.emit(job_id, event_type, **payload)
 

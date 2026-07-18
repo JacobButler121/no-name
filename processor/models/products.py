@@ -105,9 +105,25 @@ class FrameSample:
 
 
 @dataclass(frozen=True)
+class CaptionSegment:
+    start_sec: float
+    end_sec: float
+    text: str
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> CaptionSegment:
+        return cls(
+            start_sec=float(_value(data, "startSec", "start_sec", default=0)),
+            end_sec=float(_value(data, "endSec", "end_sec", default=0)),
+            text=str(_value(data, "text", default="")).strip(),
+        )
+
+
+@dataclass(frozen=True)
 class FrameManifest:
     frames: tuple[FrameSample, ...]
     transcript: str | None = None
+    caption_segments: tuple[CaptionSegment, ...] = ()
     source_url: str | None = None
     search_focus: str | None = None
     duration_sec: float | None = None
@@ -121,12 +137,14 @@ class FrameManifest:
         if isinstance(data, Mapping):
             raw_frames = _value(data, "frames", "samples", default=[])
             transcript = _value(data, "transcript", "captions")
+            raw_segments = _value(data, "captionSegments", "caption_segments", default=[])
             source_url = _value(data, "sourceUrl", "source_url", "url")
             search_focus = _value(data, "searchFocus", "search_focus", "focus")
             duration = _value(data, "durationSec", "duration_sec", "duration")
         else:
             raw_frames = data
             transcript = None
+            raw_segments = []
             source_url = None
             search_focus = None
             duration = None
@@ -134,6 +152,7 @@ class FrameManifest:
         return cls(
             frames=frames,
             transcript=str(transcript) if transcript else None,
+            caption_segments=tuple(CaptionSegment.from_dict(item) for item in raw_segments),
             source_url=str(source_url) if source_url else None,
             search_focus=str(search_focus).strip() if search_focus else None,
             duration_sec=float(duration) if duration is not None else None,
@@ -147,6 +166,9 @@ class Appearance:
     end_sec: float | None = None
     thumbnail_url: str | None = None
     bounding_box: BoundingBox | None = None
+    # Processor-only source used for visual retailer verification. It is never
+    # serialized to the browser or exposed outside the temporary job.
+    source_path: str | None = None
 
     def __post_init__(self) -> None:
         if self.start_sec < 0:
@@ -163,6 +185,7 @@ class Appearance:
             thumbnail_url=_value(data, "thumbnailUrl", "thumbnail_url"),
             bounding_box=BoundingBox.from_dict(_value(data, "boundingBox", "bounding_box")),
             evidence=str(_value(data, "evidence", default="Visible in frame")),
+            source_path=_value(data, "sourcePath", "source_path", "path"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -187,6 +210,7 @@ class ProductCandidate:
     model: str | None = None
     color: str | None = None
     material: str | None = None
+    visual_description: str | None = None
     visible_text: list[str] = field(default_factory=list)
     instance_key: str | None = None
 
@@ -210,6 +234,9 @@ class ProductCandidate:
             model=_clean_optional(_value(data, "model")),
             color=_clean_optional(_value(data, "color")),
             material=_clean_optional(_value(data, "material")),
+            visual_description=_clean_optional(
+                _value(data, "visualDescription", "visual_description")
+            ),
             visible_text=[str(item).strip() for item in _value(data, "visibleText", "visible_text", default=[]) if str(item).strip()],
             instance_key=_clean_optional(_value(data, "instanceKey", "instance_key")),
         )
@@ -238,6 +265,8 @@ class ProductFinding:
     match_kind: MatchKind
     confidence: float
     appearances: list[Appearance]
+    detection_confidence: float | None = None
+    match_confidence: float | None = None
     brand: str | None = None
     model: str | None = None
     retailer_name: str | None = None
@@ -255,6 +284,10 @@ class ProductFinding:
             "confidence": round(self.confidence, 4),
             "appearances": [item.to_dict() for item in sorted(self.appearances, key=lambda item: item.start_sec)],
         }
+        if self.detection_confidence is not None:
+            payload["detectionConfidence"] = round(self.detection_confidence, 4)
+        if self.match_confidence is not None:
+            payload["matchConfidence"] = round(self.match_confidence, 4)
         optional = {
             "brand": self.brand,
             "model": self.model,

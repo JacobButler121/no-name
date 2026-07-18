@@ -9,6 +9,13 @@ from processor.models import Appearance, ProductCandidate
 
 
 _NOISE = {"a", "an", "the", "product", "item", "unknown", "generic"}
+_CATEGORY_FAMILIES = {
+    "lighting": {"lamp", "light", "lighting", "sconce", "chandelier", "pendant"},
+    "headphones": {"headphone", "headphones", "headset", "earbuds"},
+    "shoes": {"shoe", "shoes", "sneaker", "sneakers", "boot", "boots"},
+    "seating": {"chair", "chairs", "stool", "sofa", "couch", "bench"},
+}
+_BATCH_PATTERN = re.compile(r"batch-(\d+)-candidate-")
 
 
 def _normalized(value: str | None) -> str:
@@ -22,8 +29,21 @@ def _tokens(*values: str | None) -> set[str]:
     return set(_normalized(" ".join(value or "" for value in values)).split())
 
 
+def _category_family(value: str | None) -> str:
+    tokens = set(_normalized(value).split())
+    for family, aliases in _CATEGORY_FAMILIES.items():
+        if tokens & aliases:
+            return family
+    return _normalized(value)
+
+
+def _batch_id(candidate: ProductCandidate) -> str | None:
+    match = _BATCH_PATTERN.search(candidate.id)
+    return match.group(1) if match else None
+
+
 def _similarity(left: ProductCandidate, right: ProductCandidate) -> float:
-    if _normalized(left.category) != _normalized(right.category):
+    if _category_family(left.category) != _category_family(right.category):
         return 0.0
     left_brand, right_brand = _normalized(left.brand), _normalized(right.brand)
     left_model, right_model = _normalized(left.model), _normalized(right.model)
@@ -34,9 +54,19 @@ def _similarity(left: ProductCandidate, right: ProductCandidate) -> float:
     if left_brand and right_brand and left_model and right_model:
         return 1.0
     if left.instance_key and right.instance_key:
-        return 1.0 if _normalized(left.instance_key) == _normalized(right.instance_key) else 0.0
-    left_tokens = _tokens(left.name, left.brand, left.model, left.color, left.material)
-    right_tokens = _tokens(right.name, right.brand, right.model, right.color, right.material)
+        if _normalized(left.instance_key) == _normalized(right.instance_key):
+            return 1.0
+        # Instance keys are authoritative only inside one model request. The
+        # model cannot coordinate key names across independently analyzed batches.
+        left_batch, right_batch = _batch_id(left), _batch_id(right)
+        if not left_batch or not right_batch or left_batch == right_batch:
+            return 0.0
+    left_tokens = _tokens(
+        left.name, left.brand, left.model, left.color, left.material, left.visual_description
+    )
+    right_tokens = _tokens(
+        right.name, right.brand, right.model, right.color, right.material, right.visual_description
+    )
     union = left_tokens | right_tokens
     jaccard = len(left_tokens & right_tokens) / len(union) if union else 0.0
     name_ratio = SequenceMatcher(None, _normalized(left.name), _normalized(right.name)).ratio()
@@ -57,6 +87,7 @@ def _merge_appearances(items: Iterable[Appearance], tolerance_sec: float = 0.75)
                 thumbnail_url=prior.thumbnail_url or item.thumbnail_url,
                 bounding_box=prior.bounding_box or item.bounding_box,
                 evidence=max((prior.evidence, item.evidence), key=len),
+                source_path=prior.source_path or item.source_path,
             )
         else:
             result.append(item)
@@ -79,6 +110,7 @@ def _merge_into(target: ProductCandidate, source: ProductCandidate) -> None:
     target.model = target.model or source.model
     target.color = target.color or source.color
     target.material = target.material or source.material
+    target.visual_description = target.visual_description or source.visual_description
     target.instance_key = target.instance_key or source.instance_key
     target.visible_text = sorted(set(target.visible_text + source.visible_text), key=str.casefold)
     target.appearances = _merge_appearances([*target.appearances, *source.appearances])
