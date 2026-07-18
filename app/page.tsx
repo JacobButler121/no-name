@@ -168,7 +168,7 @@ type AppearanceGroup = {
 
 function groupAppearances(
   appearances: Appearance[],
-  maximumGapSec = 30,
+  maximumGapSec = 2.25,
 ): AppearanceGroup[] {
   const ordered = [...appearances].sort((left, right) => left.startSec - right.startSec);
   const groups: AppearanceGroup[] = [];
@@ -184,6 +184,12 @@ function groupAppearances(
   }
   return groups;
 }
+
+// One-second frame sampling means the closest observation should be no more
+// than about half a second from playback. A small allowance keeps overlays
+// stable across YouTube's 500ms player updates without carrying a tag into a
+// visibly different moment.
+const APPEARANCE_MATCH_WINDOW_SEC = 0.75;
 
 function appearanceGroupLabel(group: AppearanceGroup) {
   const start = formatTime(group.first.startSec);
@@ -258,7 +264,6 @@ export default function Home() {
   const pastedYoutubeId = youtubeVideoId(url);
   const youtubeId = youtubeVideoId(sourceUrl);
   const mainProducts = products.filter((product) => product.matchKind !== "possible" && Boolean(product.productUrl));
-  const unmatchedProducts = products.filter((product) => !product.productUrl);
   const taggedProducts = products.filter((product) => product.appearances.length > 0);
   const groupedMoments = taggedProducts.flatMap((product) =>
     groupAppearances(product.appearances).map((group) => ({ product, group })),
@@ -343,7 +348,7 @@ export default function Home() {
           const time = player.getCurrentTime();
           if (!Number.isFinite(time)) return;
           setCurrentTime(time);
-          setActiveAppearance((current) => current && Math.abs(time - current.startSec) > 4 ? null : current);
+          setActiveAppearance((current) => current && Math.abs(time - current.startSec) > APPEARANCE_MATCH_WINDOW_SEC ? null : current);
         } catch { /* the player may be between states */ }
       }, 500);
     }).catch(() => {
@@ -588,12 +593,15 @@ export default function Home() {
   const workspaceVisible = status === "starting" || status === "running" || status === "complete";
   const nearbyTag = taggedProducts
     .flatMap((product) => product.appearances.map((appearance) => ({ product, appearance })))
-    .filter(({ appearance }) => Math.abs(currentTime - appearance.startSec) <= 3)
+    .filter(({ appearance }) => Math.abs(currentTime - appearance.startSec) <= APPEARANCE_MATCH_WINDOW_SEC)
     .sort((left, right) => Math.abs(currentTime - left.appearance.startSec) - Math.abs(currentTime - right.appearance.startSec))[0];
-  const currentAppearance = activeAppearance && Math.abs(currentTime - activeAppearance.startSec) <= 3
+  const selectedAppearanceIsCurrent = Boolean(
+    activeAppearance && Math.abs(currentTime - activeAppearance.startSec) <= APPEARANCE_MATCH_WINDOW_SEC,
+  );
+  const currentAppearance = selectedAppearanceIsCurrent
     ? activeAppearance
     : nearbyTag?.appearance;
-  const currentTagProduct = activeAppearance && activeProduct ? activeProduct : nearbyTag?.product;
+  const currentTagProduct = selectedAppearanceIsCurrent && activeProduct ? activeProduct : nearbyTag?.product;
   const currentBox = currentAppearance?.boundingBox;
 
   return (
@@ -668,7 +676,7 @@ export default function Home() {
                   style={{ backgroundImage: `url(https://i.ytimg.com/vi/${youtubeId}/hqdefault.jpg)` }}
                 />
               ) : jobId && mediaAvailable ? (
-                <video ref={videoRef} controls playsInline preload="metadata" src={`/api/jobs/${encodeURIComponent(jobId)}/media`} onCanPlay={(event) => { setVideoReady(true); if (event.currentTarget.videoWidth && event.currentTarget.videoHeight) setVideoDimensions({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight }); }} onTimeUpdate={(event) => { setCurrentTime(event.currentTarget.currentTime); if (activeAppearance && Math.abs(event.currentTarget.currentTime - activeAppearance.startSec) > 3) setActiveAppearance(null); }} />
+                <video ref={videoRef} controls playsInline preload="metadata" src={`/api/jobs/${encodeURIComponent(jobId)}/media`} onCanPlay={(event) => { setVideoReady(true); if (event.currentTarget.videoWidth && event.currentTarget.videoHeight) setVideoDimensions({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight }); }} onTimeUpdate={(event) => { setCurrentTime(event.currentTarget.currentTime); if (activeAppearance && Math.abs(event.currentTarget.currentTime - activeAppearance.startSec) > APPEARANCE_MATCH_WINDOW_SEC) setActiveAppearance(null); }} />
               ) : null}
               {!youtubeId && <div className="video-loading" aria-hidden={videoReady}>
                 <div className="scan-orbit"><span>AI</span><i /><i /><i /></div>
@@ -702,7 +710,6 @@ export default function Home() {
                 <div className="results-summary"><div><strong>{mainProducts.length.toString().padStart(2, "0")}</strong><span>Verified shopping<br />matches</span></div><p><i />Exact match <b>{mainProducts.filter((product) => product.matchKind === "exact").length}</b></p></div>
                 {mainProducts.length === 0 && <div className="no-findings"><h2>No verified shopping matches</h2><p>Spotted detected objects, but none passed both retailer-page and visual verification.</p></div>}
                 <div className="product-list">{mainProducts.map((product, index) => <ProductCard key={product.id} product={product} index={index} active={activeId === product.id} onSelect={() => setActiveId(product.id)} onTime={(appearance) => seek(product, appearance)} />)}</div>
-                {unmatchedProducts.length > 0 && <div className="unmatched-summary"><strong>{unmatchedProducts.length} additional {unmatchedProducts.length === 1 ? "object was" : "objects were"} detected</strong><span>No retailer match passed visual verification, so {unmatchedProducts.length === 1 ? "it is" : "they are"} not shown as shopping results.</span></div>}
               </div>
             )}
           </div>
@@ -711,7 +718,7 @@ export default function Home() {
       </div>
 
       {workspaceVisible && <button className="mobile-toggle" onClick={() => setMobileResults((value) => !value)}>{mobileResults ? "Show video" : `Show ${mainProducts.length} matches`} <span>↗</span></button>}
-      <footer><div className="logo footer-logo"><span>Spotted</span><i aria-hidden="true" /></div><p>Spotted studies the scenes, identifies what matters, and finds the closest products you can actually buy.</p><span>Built for the OpenAI hackathon · 2026</span></footer>
+      <footer><div className="logo footer-logo"><span>Spotted</span><i aria-hidden="true" /></div><span>Built for the OpenAI hackathon · 2026</span></footer>
     </main>
   );
 }

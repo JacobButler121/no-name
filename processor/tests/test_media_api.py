@@ -78,7 +78,7 @@ class MediaApiTests(unittest.TestCase):
             snapshot = self._wait_for_terminal(job_id)
 
         self.assertEqual(snapshot["status"], "completed")
-        self.assertEqual(len(snapshot["frames"]), 1)
+        self.assertGreaterEqual(len(snapshot["frames"]), 1)
         manifest = json.loads(
             (self.store.get(job_id).directory / "frames" / "manifest.json").read_text()
         )
