@@ -160,6 +160,38 @@ function formatTime(seconds: number) {
     : `${minutes}:${String(secs).padStart(2, "0")}`;
 }
 
+type AppearanceGroup = {
+  first: Appearance;
+  lastSec: number;
+  count: number;
+};
+
+function groupAppearances(
+  appearances: Appearance[],
+  maximumGapSec = 30,
+): AppearanceGroup[] {
+  const ordered = [...appearances].sort((left, right) => left.startSec - right.startSec);
+  const groups: AppearanceGroup[] = [];
+  for (const appearance of ordered) {
+    const endSec = Math.max(appearance.startSec, appearance.endSec ?? appearance.startSec);
+    const current = groups.at(-1);
+    if (current && appearance.startSec - current.lastSec <= maximumGapSec) {
+      current.lastSec = Math.max(current.lastSec, endSec);
+      current.count += 1;
+    } else {
+      groups.push({ first: appearance, lastSec: endSec, count: 1 });
+    }
+  }
+  return groups;
+}
+
+function appearanceGroupLabel(group: AppearanceGroup) {
+  const start = formatTime(group.first.startSec);
+  return group.lastSec > group.first.startSec + 1
+    ? `${start}–${formatTime(group.lastSec)}`
+    : start;
+}
+
 function productPercent(confidence: number) {
   const normalized = confidence <= 1 ? confidence * 100 : confidence;
   return Math.round(Math.min(100, Math.max(0, normalized)));
@@ -238,6 +270,9 @@ export default function Home() {
   const mainProducts = products.filter((product) => product.matchKind !== "possible" && Boolean(product.productUrl));
   const unmatchedProducts = products.filter((product) => !product.productUrl);
   const taggedProducts = products.filter((product) => product.appearances.length > 0);
+  const groupedMoments = taggedProducts.flatMap((product) =>
+    groupAppearances(product.appearances).map((group) => ({ product, group })),
+  );
   const activeProduct = taggedProducts.find((product) => product.id === activeId) ?? mainProducts[0] ?? taggedProducts[0];
   const progressIndex = eventOrder.indexOf(eventType);
   const progress = status === "complete" ? 100 : Math.max(6, ((Math.max(0, progressIndex) + 1) / eventOrder.length) * 100);
@@ -643,8 +678,8 @@ export default function Home() {
               {currentBox && videoReady && currentTagProduct && <div className="detection-layer" style={videoRect}><div className="detection-box" style={{ left: `${currentBox.x * 100}%`, top: `${currentBox.y * 100}%`, width: `${currentBox.width * 100}%`, height: `${currentBox.height * 100}%` }}><span>{currentTagProduct.name} · {productPercent(currentTagProduct.matchConfidence ?? currentTagProduct.detectionConfidence ?? currentTagProduct.confidence)}%</span></div></div>}
             </div>
             <div className="moments">
-              <div><span className="moment-count">{taggedProducts.reduce((sum, product) => sum + product.appearances.length, 0).toString().padStart(2, "0")}</span><span>Tagged moments<br />across {taggedProducts.length || "—"} detections</span></div>
-              <div className="moment-list">{taggedProducts.flatMap((product) => product.appearances.map((appearance, index) => <button key={`${product.id}-${appearance.startSec}-${index}`} className={activeId === product.id && Math.abs(currentTime - appearance.startSec) < 0.75 ? "active" : ""} onClick={() => seek(product, appearance)}><span>{formatTime(appearance.startSec)}</span>{product.brand || product.name}</button>))}</div>
+              <div><span className="moment-count">{taggedProducts.length.toString().padStart(2, "0")}</span><span>Tagged products<br />repeat sightings grouped</span></div>
+              <div className="moment-list">{groupedMoments.map(({ product, group }) => <button key={`${product.id}-${group.first.startSec}`} className={activeId === product.id && currentTime >= group.first.startSec - 0.75 && currentTime <= group.lastSec + 0.75 ? "active" : ""} title={group.count > 1 ? `${group.count} nearby sampled appearances grouped` : group.first.evidence} onClick={() => seek(product, group.first)}><span>{appearanceGroupLabel(group)}</span>{product.brand || product.name}</button>)}</div>
             </div>
           </div>
 
@@ -683,6 +718,7 @@ export default function Home() {
 function ProductCard({ product, index, active, onSelect, onTime }: { product: ProductFinding; index: number; active: boolean; onSelect: () => void; onTime: (appearance: Appearance) => void }) {
   const [imageFailed, setImageFailed] = useState(false);
   const image = product.imageUrl || product.appearances[0]?.thumbnailUrl;
+  const appearanceGroups = groupAppearances(product.appearances);
   return (
     <article className={`product-card ${active ? "active" : ""}`} onMouseEnter={onSelect}>
       <button className="product-visual" onClick={onSelect} aria-label={`Show ${product.name} in video`}>
@@ -697,7 +733,7 @@ function ProductCard({ product, index, active, onSelect, onTime }: { product: Pr
       <div className="product-copy">
         <div className="product-meta"><span className={`match-label ${product.matchKind}`}>{product.matchKind}</span><span>{productPercent(product.matchConfidence ?? product.confidence)}% match confidence</span></div>
         <p>{product.brand || product.category}</p><h3>{product.name}</h3><small>{product.category}{product.model ? ` · ${product.model}` : ""}</small>
-        <div className="timestamps"><span>Seen at</span>{product.appearances.map((appearance, index) => <button key={`${appearance.startSec}-${index}`} title={appearance.evidence} onClick={() => onTime(appearance)}>{formatTime(appearance.startSec)}</button>)}</div>
+        <div className="timestamps"><span>Seen</span>{appearanceGroups.map((group) => <button key={group.first.startSec} title={group.count > 1 ? `${group.count} nearby sampled appearances grouped` : group.first.evidence} onClick={() => onTime(group.first)}>{appearanceGroupLabel(group)}</button>)}</div>
       </div>
       <div className="product-shop">{product.price && <strong>{product.price}</strong>}<small>{product.retailerName ? `at ${product.retailerName}` : "Verified retailer"}</small>{product.productUrl && <a href={product.productUrl} target="_blank" rel="noopener noreferrer">View product <span>↗</span></a>}</div>
     </article>
