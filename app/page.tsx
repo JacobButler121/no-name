@@ -1,6 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 
 type YouTubePlayer = {
   destroy: () => void;
@@ -186,6 +187,23 @@ async function responseJson(response: Response): Promise<JobResponse> {
   }
 }
 
+type ViewTransitionDocument = Document & {
+  startViewTransition?: (update: () => void | Promise<void>) => { finished: Promise<void> };
+};
+
+function withSurfaceTransition(update: () => void): Promise<void> {
+  const transitionDocument = document as ViewTransitionDocument;
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (!transitionDocument.startViewTransition || reduceMotion) {
+    update();
+    return Promise.resolve();
+  }
+  const transition = transitionDocument.startViewTransition(() => {
+    flushSync(update);
+  });
+  return transition.finished.catch(() => undefined);
+}
+
 export default function Home() {
   const [url, setUrl] = useState("");
   const [sourceUrl, setSourceUrl] = useState("");
@@ -202,6 +220,7 @@ export default function Home() {
   const [error, setError] = useState("");
   const [mobileResults, setMobileResults] = useState(false);
   const [videoReady, setVideoReady] = useState(false);
+  const [surfaceSettling, setSurfaceSettling] = useState(false);
   const [mediaAvailable, setMediaAvailable] = useState(false);
   const [videoDimensions, setVideoDimensions] = useState({ width: 16, height: 9 });
   const [videoRect, setVideoRect] = useState({ left: 0, top: 0, width: 0, height: 0 });
@@ -211,13 +230,15 @@ export default function Home() {
   const youtubeHostRef = useRef<HTMLDivElement>(null);
   const youtubePlayerRef = useRef<YouTubePlayer | null>(null);
   const pendingSeekRef = useRef<number | null>(null);
+  const surfaceHandoffRef = useRef<Promise<void>>(Promise.resolve());
   const fileRef = useRef<HTMLInputElement>(null);
 
   const pastedYoutubeId = youtubeVideoId(url);
   const youtubeId = youtubeVideoId(sourceUrl);
   const mainProducts = products.filter((product) => product.matchKind !== "possible" && Boolean(product.productUrl));
   const unmatchedProducts = products.filter((product) => !product.productUrl);
-  const activeProduct = mainProducts.find((product) => product.id === activeId) ?? mainProducts[0];
+  const taggedProducts = products.filter((product) => product.appearances.length > 0);
+  const activeProduct = taggedProducts.find((product) => product.id === activeId) ?? mainProducts[0] ?? taggedProducts[0];
   const progressIndex = eventOrder.indexOf(eventType);
   const progress = status === "complete" ? 100 : Math.max(6, ((Math.max(0, progressIndex) + 1) / eventOrder.length) * 100);
 
@@ -355,13 +376,17 @@ export default function Home() {
     }
     if (type === "product_ready" && isFinding(payload)) addFinding(payload);
     if (type === "retrieval_blocked") {
-      setStatus("blocked");
-      setError(eventMessage || "This platform did not provide the video. Upload the file to continue.");
       streamRef.current?.close();
+      void surfaceHandoffRef.current.then(() => withSurfaceTransition(() => {
+        setStatus("blocked");
+        setError(eventMessage || "This platform did not provide the video. Upload the file to continue.");
+      }));
     } else if (type === "failed") {
-      setStatus("error");
-      setError(eventMessage || "The processor could not finish this video.");
       streamRef.current?.close();
+      void surfaceHandoffRef.current.then(() => withSurfaceTransition(() => {
+        setStatus("error");
+        setError(eventMessage || "The processor could not finish this video.");
+      }));
     } else if (type === "completed") {
       setStatus("complete");
       streamRef.current?.close();
@@ -400,19 +425,24 @@ export default function Home() {
     const videoUrl = url.trim();
     if (!videoUrl) return;
     try { new URL(videoUrl); } catch { setError("Paste a complete YouTube, TikTok, or Instagram URL."); setStatus("error"); return; }
-    setStatus("starting");
-    setEventType("retrieving_video");
-    setEventHistory(["retrieving_video"]);
-    setProducts([]);
-    setActiveId("");
-    setActiveAppearance(null);
-    setError("");
-    setMobileResults(false);
-    setVideoReady(false);
-    setMediaAvailable(false);
-    setVideoDimensions({ width: 16, height: 9 });
-    pendingSeekRef.current = null;
-    setSourceUrl(videoUrl);
+    const handoff = withSurfaceTransition(() => {
+      setSurfaceSettling(true);
+      setStatus("starting");
+      setEventType("retrieving_video");
+      setEventHistory(["retrieving_video"]);
+      setProducts([]);
+      setActiveId("");
+      setActiveAppearance(null);
+      setError("");
+      setMobileResults(false);
+      setVideoReady(false);
+      setMediaAvailable(false);
+      setVideoDimensions({ width: 16, height: 9 });
+      pendingSeekRef.current = null;
+      setSourceUrl(videoUrl);
+    });
+    surfaceHandoffRef.current = handoff;
+    void handoff.finally(() => setSurfaceSettling(false));
     try {
       const response = await fetch("/api/jobs", {
         method: "POST",
@@ -423,8 +453,11 @@ export default function Home() {
       if (!response.ok) throw new Error(responseMessage(data, "The video processor is unavailable."));
       startJob(data);
     } catch (reason) {
-      setStatus("error");
-      setError(reason instanceof Error ? reason.message : "Could not start this video.");
+      await handoff;
+      await withSurfaceTransition(() => {
+        setStatus("error");
+        setError(reason instanceof Error ? reason.message : "Could not start this video.");
+      });
     }
   }
 
@@ -434,27 +467,35 @@ export default function Home() {
     const form = new FormData();
     form.append("file", file);
     if (focus.trim()) form.append("focus", focus.trim());
-    setStatus("starting");
-    setEventType("retrieving_video");
-    setEventHistory(["retrieving_video"]);
-    setProducts([]);
-    setActiveId("");
-    setActiveAppearance(null);
-    setError("");
-    setPlatform("upload");
-    setSourceUrl("");
-    setVideoReady(false);
-    setMediaAvailable(false);
-    setVideoDimensions({ width: 16, height: 9 });
-    pendingSeekRef.current = null;
+    const handoff = withSurfaceTransition(() => {
+      setSurfaceSettling(true);
+      setStatus("starting");
+      setEventType("retrieving_video");
+      setEventHistory(["retrieving_video"]);
+      setProducts([]);
+      setActiveId("");
+      setActiveAppearance(null);
+      setError("");
+      setPlatform("upload");
+      setSourceUrl("");
+      setVideoReady(false);
+      setMediaAvailable(false);
+      setVideoDimensions({ width: 16, height: 9 });
+      pendingSeekRef.current = null;
+    });
+    surfaceHandoffRef.current = handoff;
+    void handoff.finally(() => setSurfaceSettling(false));
     try {
       const response = await fetch("/api/jobs/upload", { method: "POST", body: form });
       const data = await responseJson(response);
       if (!response.ok) throw new Error(responseMessage(data, "The upload could not be started."));
       startJob(data);
     } catch (reason) {
-      setStatus("error");
-      setError(reason instanceof Error ? reason.message : "Could not upload this video.");
+      await handoff;
+      await withSurfaceTransition(() => {
+        setStatus("error");
+        setError(reason instanceof Error ? reason.message : "Could not upload this video.");
+      });
     } finally {
       event.target.value = "";
     }
@@ -463,19 +504,21 @@ export default function Home() {
   async function newSearch() {
     streamRef.current?.close();
     const id = jobId;
-    setJobId(null);
-    setStatus("idle");
-    setProducts([]);
-    setEventHistory([]);
-    setActiveId("");
-    setActiveAppearance(null);
-    setCurrentTime(0);
-    setError("");
-    setVideoReady(false);
-    setMediaAvailable(false);
-    setVideoDimensions({ width: 16, height: 9 });
-    pendingSeekRef.current = null;
-    setSourceUrl("");
+    withSurfaceTransition(() => {
+      setJobId(null);
+      setStatus("idle");
+      setProducts([]);
+      setEventHistory([]);
+      setActiveId("");
+      setActiveAppearance(null);
+      setCurrentTime(0);
+      setError("");
+      setVideoReady(false);
+      setMediaAvailable(false);
+      setVideoDimensions({ width: 16, height: 9 });
+      pendingSeekRef.current = null;
+      setSourceUrl("");
+    });
     if (id) {
       try { await fetch(`/api/jobs/${encodeURIComponent(id)}`, { method: "DELETE", keepalive: true }); } catch { /* jobs also expire */ }
     }
@@ -507,11 +550,14 @@ export default function Home() {
   }
 
   const workspaceVisible = status === "starting" || status === "running" || status === "complete";
+  const nearbyTag = taggedProducts
+    .flatMap((product) => product.appearances.map((appearance) => ({ product, appearance })))
+    .filter(({ appearance }) => Math.abs(currentTime - appearance.startSec) <= 3)
+    .sort((left, right) => Math.abs(currentTime - left.appearance.startSec) - Math.abs(currentTime - right.appearance.startSec))[0];
   const currentAppearance = activeAppearance && Math.abs(currentTime - activeAppearance.startSec) <= 3
     ? activeAppearance
-    : activeProduct?.appearances
-        .filter((appearance) => Math.abs(currentTime - appearance.startSec) <= 3)
-        .sort((left, right) => Math.abs(currentTime - left.startSec) - Math.abs(currentTime - right.startSec))[0];
+    : nearbyTag?.appearance;
+  const currentTagProduct = activeAppearance && activeProduct ? activeProduct : nearbyTag?.product;
   const currentBox = currentAppearance?.boundingBox;
 
   return (
@@ -521,11 +567,12 @@ export default function Home() {
         {workspaceVisible && <button className="header-action" onClick={() => void newSearch()}>New search <span>＋</span></button>}
       </header>
 
-      <section className="intro" id="top">
-        <h1>Spot it. Buy it.</h1>
-      </section>
+      <div className="experience-stage">
+        <section className="intro" id="top">
+          <h1>Spot it. Buy it.</h1>
+        </section>
 
-      <form className="composer" onSubmit={submitUrl}>
+        <form className="composer" onSubmit={submitUrl}>
         <div className="composer-fields">
           <div className="prompt-field prompt-field-url">
             <button className="prompt-plus" type="button" onClick={() => fileRef.current?.click()} aria-label="Upload a video">＋</button>
@@ -560,42 +607,44 @@ export default function Home() {
           <div className="composer-links"><button type="button" onClick={() => fileRef.current?.click()}>Upload a video instead</button></div>
         </div>
         <input ref={fileRef} className="file-input" type="file" accept="video/mp4,video/quicktime,video/webm,video/x-matroska" onChange={uploadVideo} />
-      </form>
+        </form>
 
-      {(status === "error" || status === "blocked") && (
-        <div className="notice" role="alert">
-          <div><strong>{status === "blocked" ? "The platform blocked this link" : "The scan couldn’t start"}</strong><p>{error}</p></div>
-          <button onClick={() => fileRef.current?.click()}>Upload video <span>↑</span></button>
-        </div>
-      )}
+        {(status === "error" || status === "blocked") && (
+          <div className="notice" role="alert">
+            <div><strong>{status === "blocked" ? "The platform blocked this link" : "The scan couldn’t start"}</strong><p>{error}</p></div>
+            <button onClick={() => fileRef.current?.click()}>Upload video <span>↑</span></button>
+          </div>
+        )}
 
-      {workspaceVisible && (
-        <section className={`workspace ${status === "running" || status === "starting" ? "is-running" : ""}`} aria-label="Video findings workspace">
+        {workspaceVisible && (
+          <section className={`workspace ${status === "running" || status === "starting" ? "is-running" : ""} ${surfaceSettling ? "is-entering" : ""}`} aria-label="Video findings workspace">
           <div className="video-column">
             <div className="panel-heading">
               <div><span className="step-number">01</span><div><strong>Video</strong><small>{jobId ? `${platform} · Job ${jobId.slice(0, 8)}` : "Creating secure session"}</small></div></div>
               <span className="source-badge">{focus.trim() ? "Focused analysis" : "Live analysis"}</span>
             </div>
-            <div ref={videoStageRef} className={`video-stage real-video-stage ${videoReady ? "is-playable" : "is-loading"}`}>
+            <div ref={videoStageRef} className={`video-stage real-video-stage ${videoReady ? "is-playable" : "is-loading"} ${youtubeId ? "has-youtube" : ""}`}>
               {youtubeId ? (
                 <div
                   ref={youtubeHostRef}
                   className="youtube-player"
                   aria-label="YouTube video player"
+                  style={{ backgroundImage: `url(https://i.ytimg.com/vi/${youtubeId}/hqdefault.jpg)` }}
                 />
               ) : jobId && mediaAvailable ? (
                 <video ref={videoRef} controls playsInline preload="metadata" src={`/api/jobs/${encodeURIComponent(jobId)}/media`} onCanPlay={(event) => { setVideoReady(true); if (event.currentTarget.videoWidth && event.currentTarget.videoHeight) setVideoDimensions({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight }); }} onTimeUpdate={(event) => { setCurrentTime(event.currentTarget.currentTime); if (activeAppearance && Math.abs(event.currentTarget.currentTime - activeAppearance.startSec) > 3) setActiveAppearance(null); }} />
               ) : null}
-              <div className="video-loading" aria-hidden={videoReady}>
+              {!youtubeId && <div className="video-loading" aria-hidden={videoReady}>
                 <div className="scan-orbit"><span>AI</span><i /><i /><i /></div>
-                <strong>{youtubeId ? "Opening YouTube playback" : "Preparing playback"}</strong>
-                <small>{youtubeId ? "The player is loading while Spotted starts its scan." : "The first frames will appear here."}</small>
-              </div>
-              {currentBox && videoReady && activeProduct && <div className="detection-layer" style={videoRect}><div className="detection-box" style={{ left: `${currentBox.x * 100}%`, top: `${currentBox.y * 100}%`, width: `${currentBox.width * 100}%`, height: `${currentBox.height * 100}%` }}><span>{activeProduct.name} · {productPercent(activeProduct.matchConfidence ?? activeProduct.confidence)}%</span></div></div>}
+                <strong>Preparing playback</strong>
+                <small>The first frames will appear here.</small>
+              </div>}
+              {youtubeId && !videoReady && <div className="youtube-loading-badge"><i /> Opening playback</div>}
+              {currentBox && videoReady && currentTagProduct && <div className="detection-layer" style={videoRect}><div className="detection-box" style={{ left: `${currentBox.x * 100}%`, top: `${currentBox.y * 100}%`, width: `${currentBox.width * 100}%`, height: `${currentBox.height * 100}%` }}><span>{currentTagProduct.name} · {productPercent(currentTagProduct.matchConfidence ?? currentTagProduct.detectionConfidence ?? currentTagProduct.confidence)}%</span></div></div>}
             </div>
             <div className="moments">
-              <div><span className="moment-count">{mainProducts.reduce((sum, product) => sum + product.appearances.length, 0).toString().padStart(2, "0")}</span><span>Matched moments<br />across {mainProducts.length || "—"} verified finds</span></div>
-              <div className="moment-list">{mainProducts.flatMap((product) => product.appearances.map((appearance, index) => <button key={`${product.id}-${appearance.startSec}-${index}`} className={activeId === product.id && Math.abs(currentTime - appearance.startSec) < 0.75 ? "active" : ""} onClick={() => seek(product, appearance)}><span>{formatTime(appearance.startSec)}</span>{product.brand || product.name}</button>))}</div>
+              <div><span className="moment-count">{taggedProducts.reduce((sum, product) => sum + product.appearances.length, 0).toString().padStart(2, "0")}</span><span>Tagged moments<br />across {taggedProducts.length || "—"} detections</span></div>
+              <div className="moment-list">{taggedProducts.flatMap((product) => product.appearances.map((appearance, index) => <button key={`${product.id}-${appearance.startSec}-${index}`} className={activeId === product.id && Math.abs(currentTime - appearance.startSec) < 0.75 ? "active" : ""} onClick={() => seek(product, appearance)}><span>{formatTime(appearance.startSec)}</span>{product.brand || product.name}</button>))}</div>
             </div>
           </div>
 
@@ -621,8 +670,9 @@ export default function Home() {
               </div>
             )}
           </div>
-        </section>
-      )}
+          </section>
+        )}
+      </div>
 
       {workspaceVisible && <button className="mobile-toggle" onClick={() => setMobileResults((value) => !value)}>{mobileResults ? "Show video" : `Show ${mainProducts.length} matches`} <span>↗</span></button>}
       <footer><div className="logo footer-logo"><span>Spotted</span><i aria-hidden="true" /></div><p>Spotted studies the scenes, identifies what matters, and finds the closest products you can actually buy.</p><span>Built for the OpenAI hackathon · 2026</span></footer>
