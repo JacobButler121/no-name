@@ -7,10 +7,11 @@ from unittest.mock import patch
 
 from processor.ai.client import OpenAIResponsesClient
 from processor.ai.dedupe import deduplicate_candidates
-from processor.ai.pipeline import ProductAnalysisPipeline, _select_candidates
+from processor.ai.pipeline import ProductAnalysisPipeline, SYSTEM_PROMPT, _select_candidates
 from processor.models import (
     AnalysisConfigurationError,
     Appearance,
+    BoundingBox,
     FrameManifest,
     MatchKind,
     ProductCandidate,
@@ -98,6 +99,10 @@ class ModelContractTests(unittest.TestCase):
 
 
 class DedupeTests(unittest.TestCase):
+    def test_extended_shopping_categories_are_explicit_detection_targets(self) -> None:
+        for category in ("watches", "clothing", "shoes", "tools"):
+            self.assertIn(category, SYSTEM_PROMPT.lower())
+
     def test_same_brand_model_merges_and_preserves_timestamps(self) -> None:
         first = candidate("first", timestamp=1.0, confidence=0.81)
         second = candidate("second", name="Sony XM5 wireless headphones", timestamp=12.0, confidence=0.94)
@@ -149,6 +154,29 @@ class DedupeTests(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual([item.start_sec for item in result[0].appearances], [10.0, 55.0])
 
+    def test_visually_conflicting_colors_do_not_merge(self) -> None:
+        pale = candidate(
+            "batch-1-candidate-1",
+            name="ceramic table lamp",
+            category="lamp",
+            brand=None,
+            model=None,
+            timestamp=10.0,
+        )
+        pale.color = "pale green"
+        pale.material = "ceramic"
+        red = candidate(
+            "batch-2-candidate-1",
+            name="ceramic table lamp",
+            category="lamp",
+            brand=None,
+            model=None,
+            timestamp=55.0,
+        )
+        red.color = "red"
+        red.material = "ceramic"
+        self.assertEqual(len(deduplicate_candidates([pale, red])), 2)
+
     def test_precision_selection_rejects_one_frame_generic_guesses(self) -> None:
         one_frame = candidate(
             "one-frame",
@@ -170,6 +198,27 @@ class DedupeTests(unittest.TestCase):
             Appearance(start_sec=6.0, evidence="Same black angled lamp")
         )
         self.assertEqual(_select_candidates([one_frame, repeated], limit=8), [repeated])
+
+    def test_focused_selection_keeps_clear_single_frame_match(self) -> None:
+        focused = candidate(
+            "focused",
+            name="pale ceramic lamp",
+            category="lamp",
+            brand=None,
+            model=None,
+            confidence=0.88,
+        )
+        focused.appearances[0] = Appearance(
+            start_sec=7.0,
+            evidence="Clear lamp in the background",
+            bounding_box=BoundingBox(x=0.4, y=0.1, width=0.2, height=0.5),
+        )
+        self.assertEqual(
+            _select_candidates(
+                [focused], limit=8, allow_single_frame=True
+            ),
+            [focused],
+        )
 
 
 class LivePipelineTests(unittest.TestCase):
@@ -222,13 +271,22 @@ class LivePipelineTests(unittest.TestCase):
             second_image = Path(directory) / "frame-two.jpg"
             second_image.write_bytes(b"also-not-decoded-locally")
             manifest["frames"].append(
-                {"timestampSec": 7.0, "path": str(second_image), "thumbnailUrl": "/thumb-two.jpg"}
+                {
+                    "timestampSec": 7.0,
+                    "path": str(second_image),
+                    "thumbnailUrl": "/thumb-two.jpg",
+                    "similarTimestamps": [12.0],
+                }
             )
             results = ProductAnalysisPipeline(client=fake).analyze(
                 manifest, event_callback=lambda event, payload: events.append(event)
             )
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].appearances[0].start_sec, 7.0)
+        self.assertEqual(
+            [item.start_sec for item in results[0].appearances],
+            [7.0, 12.0],
+        )
         self.assertEqual(results[0].appearances[0].thumbnail_url, "/thumb-two.jpg")
         self.assertIn("analyzing_frame", events)
         self.assertIn("candidate_found", events)
@@ -370,6 +428,13 @@ class RetailSearchTests(unittest.TestCase):
                     "index": 0,
                     "verdict": "similar",
                     "confidence": 0.86,
+                    "categoryMatch": "match",
+                    "shapeMatch": "match",
+                    "colorMatch": "match",
+                    "materialMatch": "match",
+                    "constructionMatch": "match",
+                    "identityEvidence": False,
+                    "contradictions": [],
                     "evidence": "Matching angled arm, black shade, and brass joints",
                 }
             ]
@@ -395,6 +460,9 @@ class RetailSearchTests(unittest.TestCase):
             detected.appearances[0] = Appearance(
                 start_sec=1.0,
                 evidence="Black angled lamp with brass joints",
+                bounding_box=BoundingBox(
+                    x=0.2, y=0.1, width=0.35, height=0.65
+                ),
                 source_path=str(frame),
             )
             service = RetailerSearchService(
@@ -404,9 +472,84 @@ class RetailSearchTests(unittest.TestCase):
             result = service.enrich(detected)
 
         self.assertEqual(result.match_kind, MatchKind.SIMILAR)
-        self.assertEqual(result.confidence, 0.86)
+        self.assertAlmostEqual(result.confidence, 0.868)
         self.assertEqual(result.product_url, metadata.url)
         self.assertEqual(len(fake.payloads), 2)
+        search_content = fake.payloads[0]["input"][0]["content"]
+        self.assertTrue(
+            any(item.get("type") == "input_image" for item in search_content)
+        )
+        self.assertEqual(fake.payloads[0]["model"], "gpt-5.6-terra")
+
+    def test_visual_contradiction_rejects_high_confidence_search_result(self) -> None:
+        fake = FakeClient(
+            [
+                {
+                    "matches": [
+                        {
+                            "productName": "Bright Red Ceramic Table Lamp",
+                            "retailerName": "Lighting Store",
+                            "productUrl": "https://lighting.example/red-lamp",
+                            "matchKind": "similar",
+                            "confidence": 0.98,
+                            "evidence": "Same broad category",
+                        }
+                    ]
+                },
+                {
+                    "comparisons": [
+                        {
+                            "index": 0,
+                            "verdict": "similar",
+                            "confidence": 0.99,
+                            "categoryMatch": "match",
+                            "shapeMatch": "match",
+                            "colorMatch": "mismatch",
+                            "materialMatch": "match",
+                            "constructionMatch": "unknown",
+                            "identityEvidence": False,
+                            "contradictions": [
+                                "Target is pale green; retailer product is bright red"
+                            ],
+                            "evidence": "Dominant color contradicts the target",
+                        }
+                    ]
+                },
+            ]
+        )
+        metadata = ProductPageMetadata(
+            url="https://lighting.example/red-lamp",
+            title="Bright Red Ceramic Table Lamp",
+            image_url="https://lighting.example/red-lamp.jpg",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            frame = Path(directory) / "frame.jpg"
+            frame.write_bytes(b"frame")
+            detected = candidate(
+                "lamp",
+                name="pale green ceramic table lamp",
+                category="lamp",
+                brand=None,
+                model=None,
+            )
+            detected.color = "pale green"
+            detected.material = "ceramic"
+            detected.appearances[0] = Appearance(
+                start_sec=7.0,
+                evidence="Pale green ceramic lamp with white shade",
+                bounding_box=BoundingBox(
+                    x=0.4, y=0.1, width=0.25, height=0.6
+                ),
+                source_path=str(frame),
+            )
+            service = RetailerSearchService(
+                client=fake,
+                metadata_fetcher=lambda *args, **kwargs: metadata,
+            )
+            result = service.enrich(detected)
+
+        self.assertEqual(result.match_kind, MatchKind.POSSIBLE)
+        self.assertIsNone(result.product_url)
 
 
 if __name__ == "__main__":

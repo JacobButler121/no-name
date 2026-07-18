@@ -67,10 +67,16 @@ class FrameSample:
     thumbnail_url: str | None = None
     width: int | None = None
     height: int | None = None
+    # Timestamps for frames that were visually near-identical to this sample.
+    # They are not sent to the model again, but detections are projected onto
+    # them so the UI retains the complete five-second appearance timeline.
+    similar_timestamps: tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
         if self.timestamp_sec < 0:
             raise ValueError("timestamp_sec cannot be negative")
+        if any(value < 0 for value in self.similar_timestamps):
+            raise ValueError("similar timestamps cannot be negative")
         if not self.path and not self.image_url:
             raise ValueError("frame requires path or image_url")
 
@@ -83,6 +89,20 @@ class FrameSample:
             thumbnail_url=_value(data, "thumbnailUrl", "thumbnail_url"),
             width=_value(data, "width"),
             height=_value(data, "height"),
+            similar_timestamps=tuple(
+                sorted(
+                    {
+                        float(value)
+                        for value in _value(
+                            data,
+                            "similarTimestamps",
+                            "similar_timestamps",
+                            default=[],
+                        )
+                        if float(value) >= 0
+                    }
+                )
+            ),
         )
 
     @property
@@ -101,6 +121,8 @@ class FrameSample:
             payload["width"] = self.width
         if self.height is not None:
             payload["height"] = self.height
+        if self.similar_timestamps:
+            payload["similarTimestamps"] = list(self.similar_timestamps)
         return payload
 
 

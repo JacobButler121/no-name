@@ -93,11 +93,19 @@ DETECTION_SCHEMA: dict[str, Any] = {
 
 
 SYSTEM_PROMPT = """You are Spotted, a conservative visual product-detection engine.
-Identify physical consumer goods a viewer could reasonably shop for, including apparel,
-accessories, electronics, furniture, decor, beauty, kitchenware, tools, toys, packaged
-goods, and sports equipment. Consider centered products and identifiable background
+Identify physical consumer goods a viewer could reasonably shop for, including watches
+and jewelry; clothing such as shirts, jackets, dresses, and pants; shoes, bags, and other
+wearable accessories; tools and workshop equipment; electronics, furniture, decor,
+beauty, kitchenware, toys, packaged goods, and sports equipment. Consider centered
+products, objects worn by people, objects being handled, and identifiable background
 objects. Never identify people, body parts, scenery, architecture, text overlays, or
 digital-only content as products.
+
+Treat each visible garment, shoe pair, watch, accessory, or tool as its own shoppable
+object when enough of it is visible to describe. For worn products, enclose the item—not
+the person's full body—in the bounding box. Do not guess a clothing or accessory brand
+from style alone. When a pair of shoes is clearly one matching product, return one
+candidate rather than separate left and right shoes.
 
 Only state a brand or model when supported by readable text, a distinctive design, or
 the transcript. Use null rather than guessing. Use a useful generic name when the exact
@@ -112,11 +120,13 @@ The same physical item across frames must use the same short instanceKey. Differ
 physical instances—even visually similar ones—must use different instanceKeys. Return
 every frameIndex where it appears in this batch. frameIndex must be copied from the
 label immediately before the corresponding image; never calculate or invent a timestamp.
-Evidence must briefly describe
-what is actually visible or spoken. Return exactly one candidate per physical object;
-never return multiple possible brand or retailer identities for one object. Detection
-names describe what is visible and must not look like guessed catalog listings. Do not
-invent shopping links or prices."""
+Evidence must briefly describe what is actually visible or spoken. Bounding boxes must
+tightly enclose the named object rather than a person, wall, or whole room. Systematically
+sweep every supplied frame and do not omit a clearly visible background object that
+matches SEARCH FOCUS. Return exactly one candidate per physical object; never return
+multiple possible brand or retailer identities for one object. Detection names describe
+what is visible and must not look like guessed catalog listings. Do not invent shopping
+links or prices."""
 
 
 def _emit(callback: EventCallback | None, event_type: str, payload: dict[str, Any]) -> None:
@@ -143,8 +153,8 @@ class ProductAnalysisPipeline:
         batch_size: int = 10,
         detail: str = "high",
         min_confidence: float = 0.7,
-        focused_limit: int = 8,
-        broad_limit: int = 12,
+        focused_limit: int = 5,
+        broad_limit: int = 8,
     ) -> None:
         if not 1 <= batch_size <= 20:
             raise ValueError("batch_size must be between 1 and 20")
@@ -202,6 +212,7 @@ class ProductAnalysisPipeline:
         selected = _select_candidates(
             merged,
             limit=self.focused_limit if parsed.search_focus else self.broad_limit,
+            allow_single_frame=bool(parsed.search_focus),
         )
         _emit(
             event_callback,
@@ -285,15 +296,26 @@ class ProductAnalysisPipeline:
                     if not isinstance(frame_index, int) or not 0 <= frame_index < len(frames):
                         continue
                     frame = frames[frame_index]
-                    normalized_appearances.append(
-                        {
-                            "startSec": frame.timestamp_sec,
-                            "evidence": raw_appearance.get("evidence", "Visible in sampled frame"),
-                            "boundingBox": raw_appearance.get("boundingBox"),
-                            "thumbnailUrl": frame.thumbnail_url,
-                            "sourcePath": frame.path,
-                        }
+                    evidence = raw_appearance.get(
+                        "evidence", "Visible in sampled frame"
                     )
+                    for timestamp in (
+                        frame.timestamp_sec,
+                        *frame.similar_timestamps,
+                    ):
+                        normalized_appearances.append(
+                            {
+                                "startSec": timestamp,
+                                "evidence": (
+                                    evidence
+                                    if timestamp == frame.timestamp_sec
+                                    else f"{evidence}; repeated in a near-identical sampled scene"
+                                ),
+                                "boundingBox": raw_appearance.get("boundingBox"),
+                                "thumbnailUrl": frame.thumbnail_url,
+                                "sourcePath": frame.path,
+                            }
+                        )
             normalized_raw = dict(raw)
             normalized_raw["appearances"] = normalized_appearances
             candidate = ProductCandidate.from_dict(
@@ -319,7 +341,10 @@ def _captions_for_range(
 
 
 def _select_candidates(
-    candidates: Sequence[ProductCandidate], *, limit: int
+    candidates: Sequence[ProductCandidate],
+    *,
+    limit: int,
+    allow_single_frame: bool = False,
 ) -> list[ProductCandidate]:
     """Prefer defensible physical-object tracks over one-frame guesses.
 
@@ -340,6 +365,14 @@ def _select_candidates(
         for candidate in candidates
         if len({appearance.start_sec for appearance in candidate.appearances}) >= 2
         or has_identity(candidate)
+        or (
+            allow_single_frame
+            and candidate.confidence >= 0.82
+            and any(
+                appearance.bounding_box is not None
+                for appearance in candidate.appearances
+            )
+        )
     ]
 
     def score(candidate: ProductCandidate) -> tuple[float, int, float]:

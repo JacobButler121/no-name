@@ -100,6 +100,7 @@ type JobResponse = {
   status?: string;
   mediaUrl?: string | null;
   findings?: ProductFinding[];
+  metadata?: { width?: number; height?: number; durationSec?: number };
   error?: { message?: string } | string;
   message?: string;
   detail?: string;
@@ -141,7 +142,7 @@ const eventCopy: Record<EventType, string> = {
   analyzing_frame: "Looking for recognizable products",
   candidate_found: "Product candidate spotted",
   merging_duplicates: "Comparing repeat appearances",
-  searching_retailers: "Searching trusted retailers",
+  searching_retailers: "Searching product images and retailers",
   product_ready: "Shopping match ready",
   retrieval_blocked: "Upload needed",
   completed: "Analysis complete",
@@ -202,8 +203,11 @@ export default function Home() {
   const [mobileResults, setMobileResults] = useState(false);
   const [videoReady, setVideoReady] = useState(false);
   const [mediaAvailable, setMediaAvailable] = useState(false);
+  const [videoDimensions, setVideoDimensions] = useState({ width: 16, height: 9 });
+  const [videoRect, setVideoRect] = useState({ left: 0, top: 0, width: 0, height: 0 });
   const streamRef = useRef<EventSource | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const videoStageRef = useRef<HTMLDivElement>(null);
   const youtubeHostRef = useRef<HTMLDivElement>(null);
   const youtubePlayerRef = useRef<YouTubePlayer | null>(null);
   const pendingSeekRef = useRef<number | null>(null);
@@ -217,6 +221,29 @@ export default function Home() {
   const progress = status === "complete" ? 100 : Math.max(6, ((Math.max(0, progressIndex) + 1) / eventOrder.length) * 100);
 
   useEffect(() => () => streamRef.current?.close(), []);
+
+  useEffect(() => {
+    const stage = videoStageRef.current;
+    if (!stage) return;
+    const updateRect = () => {
+      const stageWidth = stage.clientWidth;
+      const stageHeight = stage.clientHeight;
+      if (!stageWidth || !stageHeight) return;
+      const sourceRatio = videoDimensions.width / videoDimensions.height || 16 / 9;
+      const stageRatio = stageWidth / stageHeight;
+      if (stageRatio > sourceRatio) {
+        const width = stageHeight * sourceRatio;
+        setVideoRect({ left: (stageWidth - width) / 2, top: 0, width, height: stageHeight });
+      } else {
+        const height = stageWidth / sourceRatio;
+        setVideoRect({ left: 0, top: (stageHeight - height) / 2, width: stageWidth, height });
+      }
+    };
+    updateRect();
+    const observer = new ResizeObserver(updateRect);
+    observer.observe(stage);
+    return () => observer.disconnect();
+  }, [status, videoDimensions.width, videoDimensions.height]);
 
   useEffect(() => {
     if (!youtubeId) return;
@@ -294,6 +321,9 @@ export default function Home() {
       const data = await responseJson(response);
       if (!response.ok) throw new Error(responseMessage(data, "Could not load the completed findings."));
       const findings = Array.isArray(data.findings) ? data.findings.filter(isFinding) : [];
+      if (data.metadata?.width && data.metadata?.height) {
+        setVideoDimensions({ width: data.metadata.width, height: data.metadata.height });
+      }
       setMediaAvailable(Boolean(data.mediaUrl));
       setProducts(findings);
       setActiveId((current) => current || findings.find((item) => item.productUrl)?.id || "");
@@ -309,7 +339,12 @@ export default function Home() {
     try { payload = raw ? JSON.parse(raw) : {}; } catch { /* named event can have no JSON body */ }
     const eventMessage = typeof payload.message === "string" ? payload.message : "";
     recordEvent(type);
-    if (type === "extracting_frames") setMediaAvailable(true);
+    if (type === "extracting_frames") {
+      setMediaAvailable(true);
+      const width = Number(payload.width);
+      const height = Number(payload.height);
+      if (width > 0 && height > 0) setVideoDimensions({ width, height });
+    }
     if (type === "product_ready" && isFinding(payload)) addFinding(payload);
     if (type === "retrieval_blocked") {
       setStatus("blocked");
@@ -367,6 +402,7 @@ export default function Home() {
     setMobileResults(false);
     setVideoReady(false);
     setMediaAvailable(false);
+    setVideoDimensions({ width: 16, height: 9 });
     pendingSeekRef.current = null;
     setSourceUrl(videoUrl);
     try {
@@ -401,6 +437,7 @@ export default function Home() {
     setSourceUrl("");
     setVideoReady(false);
     setMediaAvailable(false);
+    setVideoDimensions({ width: 16, height: 9 });
     pendingSeekRef.current = null;
     try {
       const response = await fetch("/api/jobs/upload", { method: "POST", body: form });
@@ -428,6 +465,7 @@ export default function Home() {
     setError("");
     setVideoReady(false);
     setMediaAvailable(false);
+    setVideoDimensions({ width: 16, height: 9 });
     pendingSeekRef.current = null;
     setSourceUrl("");
     if (id) {
@@ -461,40 +499,53 @@ export default function Home() {
   }
 
   const workspaceVisible = status === "starting" || status === "running" || status === "complete";
-  const currentBox = activeAppearance?.boundingBox || activeProduct?.appearances.find((appearance) => currentTime >= appearance.startSec && currentTime <= (appearance.endSec ?? appearance.startSec + 3))?.boundingBox;
+  const currentAppearance = activeAppearance && Math.abs(currentTime - activeAppearance.startSec) <= 3
+    ? activeAppearance
+    : activeProduct?.appearances
+        .filter((appearance) => Math.abs(currentTime - appearance.startSec) <= 3)
+        .sort((left, right) => Math.abs(currentTime - left.startSec) - Math.abs(currentTime - right.startSec))[0];
+  const currentBox = currentAppearance?.boundingBox;
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${workspaceVisible ? "has-workspace" : "is-landing"}`}>
       <header className="topbar">
-        <button className="logo logo-button" type="button" onClick={() => void newSearch()} aria-label="Spotted home"><span className="logo-mark">S</span>Spotted</button>
-        <div className="topbar-center"><span className="live-dot" />AI product discovery</div>
-        <button className="header-action" onClick={() => void newSearch()}>New search <span>＋</span></button>
+        <button className="logo logo-button hero-logo" type="button" onClick={() => void newSearch()} aria-label="Spotted home"><span>Spotted</span><i aria-hidden="true" /></button>
+        {workspaceVisible && <button className="header-action" onClick={() => void newSearch()}>New search <span>＋</span></button>}
       </header>
 
       <section className="intro" id="top">
-        <div><p className="kicker">Shop what you watch</p><h1>Spot it in a video.<br /><em>Find it online.</em></h1></div>
-        <p className="intro-note">Spotted studies the scenes, identifies what matters, and finds the closest products you can actually buy.</p>
+        <h1>Spot it. Buy it.</h1>
       </section>
 
       <form className="composer" onSubmit={submitUrl}>
-        <label htmlFor="composer">Drop a public video link</label>
-        <div className="composer-row">
-          <span className="composer-icon">↗</span>
-          <input id="composer" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="YouTube, TikTok, or Instagram URL" inputMode="url" disabled={status === "starting"} />
-          <button type="submit" disabled={!url.trim() || status === "starting"}>{status === "starting" ? "Starting" : "Find products"}<span>→</span></button>
-        </div>
-        <div className="focus-row">
-          <span className="focus-icon">✦</span>
-          <label htmlFor="search-focus">What should Spotted look for?</label>
-          <input
-            id="search-focus"
-            value={focus}
-            onChange={(event) => setFocus(event.target.value)}
-            placeholder="Optional — e.g. Find all the lamps in this video"
-            disabled={status === "starting"}
-            maxLength={500}
-          />
-          <span className="focus-mode">{focus.trim() ? "Focused scan" : "Find everything"}</span>
+        <div className="composer-fields">
+          <div className="prompt-field prompt-field-url">
+            <button className="prompt-plus" type="button" onClick={() => fileRef.current?.click()} aria-label="Upload a video">＋</button>
+            <div className="prompt-copy">
+              <label htmlFor="composer">Video link</label>
+              <input id="composer" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="Paste a YouTube, TikTok, or Instagram link" inputMode="url" disabled={status === "starting"} />
+            </div>
+          </div>
+          <span className="composer-divider" aria-hidden="true" />
+          <div className="prompt-field prompt-field-focus">
+            <span className="prompt-spark" aria-hidden="true">✦</span>
+            <div className="prompt-copy">
+              <label htmlFor="search-focus">What should Spotted look for?</label>
+              <input
+                id="search-focus"
+                value={focus}
+                onChange={(event) => setFocus(event.target.value)}
+                placeholder="Everything — or watches, shoes, tools…"
+                disabled={status === "starting"}
+                maxLength={500}
+              />
+            </div>
+            <span className="prompt-mode">{focus.trim() ? "Focused" : "Everything"}</span>
+          </div>
+          <button className="composer-submit" type="submit" disabled={!url.trim() || status === "starting"} aria-label={status === "starting" ? "Starting product scan" : "Find products"}>
+            <span className="composer-submit-label">{status === "starting" ? "Starting" : "Find products"}</span>
+            <span aria-hidden="true">→</span>
+          </button>
         </div>
         <div className="composer-meta">
           <div className="platforms"><span>YouTube</span><i /><span>TikTok</span><i /><span>Instagram</span></div>
@@ -510,14 +561,6 @@ export default function Home() {
         </div>
       )}
 
-      {status === "idle" && (
-        <section className="honest-empty" aria-label="How Spotted works">
-          <article><span>01</span><h2>Understands scenes</h2><p>Samples key moments and reads visual details, labels, and context.</p></article>
-          <article><span>02</span><h2>Resolves repeats</h2><p>One product card keeps every timestamp where the same item appears.</p></article>
-          <article><span>03</span><h2>Searches with evidence</h2><p>Exact matches stay separate from alternatives and possible finds.</p></article>
-        </section>
-      )}
-
       {workspaceVisible && (
         <section className={`workspace ${status === "running" || status === "starting" ? "is-running" : ""}`} aria-label="Video findings workspace">
           <div className="video-column">
@@ -525,7 +568,7 @@ export default function Home() {
               <div><span className="step-number">01</span><div><strong>Video</strong><small>{jobId ? `${platform} · Job ${jobId.slice(0, 8)}` : "Creating secure session"}</small></div></div>
               <span className="source-badge">{focus.trim() ? "Focused analysis" : "Live analysis"}</span>
             </div>
-            <div className="video-stage real-video-stage">
+            <div ref={videoStageRef} className="video-stage real-video-stage">
               {youtubeId ? (
                 <div
                   ref={youtubeHostRef}
@@ -533,10 +576,10 @@ export default function Home() {
                   aria-label="YouTube video player"
                 />
               ) : jobId && mediaAvailable ? (
-                <video ref={videoRef} controls playsInline preload="metadata" src={`/api/jobs/${encodeURIComponent(jobId)}/media`} onCanPlay={() => setVideoReady(true)} onTimeUpdate={(event) => { setCurrentTime(event.currentTarget.currentTime); if (activeAppearance && Math.abs(event.currentTarget.currentTime - activeAppearance.startSec) > 4) setActiveAppearance(null); }} />
+                <video ref={videoRef} controls playsInline preload="metadata" src={`/api/jobs/${encodeURIComponent(jobId)}/media`} onCanPlay={(event) => { setVideoReady(true); if (event.currentTarget.videoWidth && event.currentTarget.videoHeight) setVideoDimensions({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight }); }} onTimeUpdate={(event) => { setCurrentTime(event.currentTarget.currentTime); if (activeAppearance && Math.abs(event.currentTarget.currentTime - activeAppearance.startSec) > 3) setActiveAppearance(null); }} />
               ) : null}
               {!videoReady && <div className="video-loading"><div className="scan-orbit"><span>AI</span><i /><i /><i /></div><strong>Preparing playback</strong><small>The first frames will appear here.</small></div>}
-              {currentBox && videoReady && activeProduct && <div className="detection-box" style={{ left: `${currentBox.x * 100}%`, top: `${currentBox.y * 100}%`, width: `${currentBox.width * 100}%`, height: `${currentBox.height * 100}%` }}><span>{activeProduct.name} · {productPercent(activeProduct.confidence)}%</span></div>}
+              {currentBox && videoReady && activeProduct && <div className="detection-layer" style={videoRect}><div className="detection-box" style={{ left: `${currentBox.x * 100}%`, top: `${currentBox.y * 100}%`, width: `${currentBox.width * 100}%`, height: `${currentBox.height * 100}%` }}><span>{activeProduct.name} · {productPercent(activeProduct.matchConfidence ?? activeProduct.confidence)}%</span></div></div>}
             </div>
             <div className="moments">
               <div><span className="moment-count">{mainProducts.reduce((sum, product) => sum + product.appearances.length, 0).toString().padStart(2, "0")}</span><span>Matched moments<br />across {mainProducts.length || "—"} verified finds</span></div>
@@ -570,7 +613,7 @@ export default function Home() {
       )}
 
       {workspaceVisible && <button className="mobile-toggle" onClick={() => setMobileResults((value) => !value)}>{mobileResults ? "Show video" : `Show ${mainProducts.length} matches`} <span>↗</span></button>}
-      <footer><div className="logo footer-logo"><span className="logo-mark">S</span>Spotted</div><p>Products, right on cue.</p><span>Built for the OpenAI hackathon · 2026</span></footer>
+      <footer><div className="logo footer-logo"><span>Spotted</span><i aria-hidden="true" /></div><p>Spotted studies the scenes, identifies what matters, and finds the closest products you can actually buy.</p><span>Built for the OpenAI hackathon · 2026</span></footer>
     </main>
   );
 }

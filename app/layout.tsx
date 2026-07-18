@@ -17,20 +17,20 @@ export async function generateMetadata(): Promise<Metadata> {
   const protocol = forwardedProtocol === "http" || safeHost.startsWith("localhost")
     ? "http"
     : "https";
-  const socialImage = `${protocol}://${safeHost}/og-spotted.png`;
+  const socialImage = `${protocol}://${safeHost}/og-spotted-v2.png`;
 
   return {
-    title: "Spotted — Products, right on cue.",
-    description: "Paste a video. Find every product, every timestamp, and the closest trusted place to buy it.",
+    title: "Spotted — Spot it. Buy it.",
+    description: "Paste a video link, spot products at exact moments, and find the closest trusted place to buy them.",
     icons: { icon: "/favicon.svg", shortcut: "/favicon.svg" },
     openGraph: {
-      title: "Spotted — Products, right on cue.",
+      title: "Spotted — Spot it. Buy it.",
       description: "Turn any video into a timestamped shopping list.",
       images: [socialImage],
     },
     twitter: {
       card: "summary_large_image",
-      title: "Spotted — Products, right on cue.",
+      title: "Spotted — Spot it. Buy it.",
       description: "Turn any video into a timestamped shopping list.",
       images: [socialImage],
     },

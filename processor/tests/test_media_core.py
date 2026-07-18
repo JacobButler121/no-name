@@ -154,6 +154,7 @@ class MediaToolTests(unittest.TestCase):
                 video, root, job_id="static-job", metadata=metadata
             )
             self.assertEqual([frame["timestampSec"] for frame in frames], [0.0])
+            self.assertEqual(frames[0]["similarTimestamps"], [5.0, 10.0])
             manifest = json.loads(manifest_path.read_text())
             self.assertEqual(manifest["sampledFrameCount"], 3)
             self.assertEqual(manifest["skippedSimilarFrames"], 2)
