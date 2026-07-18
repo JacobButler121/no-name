@@ -109,3 +109,83 @@ footer p{margin:0;text-align:center;font-family:var(--font-geist-sans),Arial,san
   footer{min-height:145px;grid-template-columns:1fr auto;align-content:center}
   footer p{display:block;grid-column:1 / -1;grid-row:2;margin-top:19px;text-align:left}
 }
+
+/* Landing direction matched to the Spotted campaign artwork. */
+:root{--paper:#f7f3ea;--acid:#dfff75}
+body{background:var(--paper)}
+.app-shell{width:min(1580px,100%);min-height:100vh;display:flex;flex-direction:column;padding:0 54px}
+.topbar{height:108px;border-bottom:0}
+.hero-logo{gap:11px;font-size:22px;font-weight:780;letter-spacing:.16em}
+.hero-logo i,.footer-logo i{width:9px;height:9px;display:block;border-radius:50%;background:var(--acid)}
+.intro{padding:102px 0 54px}
+.intro h1{font-family:"Iowan Old Style",Baskerville,"Times New Roman",serif;font-size:clamp(78px,8vw,138px);line-height:.89;letter-spacing:-.065em;font-weight:400}
+.composer{width:min(1370px,100%);padding:27px;border:0;border-radius:48px;background:#111210;color:#fff;box-shadow:0 30px 70px rgba(32,27,20,.18)}
+.composer-fields{grid-template-columns:minmax(0,1.08fr) minmax(330px,.82fr) 78px;gap:18px}
+.prompt-field{min-height:100px;padding:18px 25px;border-radius:50px}
+.prompt-field-url{background:#252624;border:1px solid #30312f}
+.prompt-field-focus{background:transparent;border:2px solid #6c6d68}
+.prompt-field:focus-within{border-color:var(--acid);box-shadow:0 0 0 1px var(--acid)}
+.prompt-plus{width:47px;height:47px;flex-basis:47px;border-color:#6b6c67;background:transparent;color:#fff;font-size:24px}
+.prompt-plus:hover{background:#353633;border-color:#aaa9a3}
+.prompt-spark{color:var(--acid);font-size:19px}
+.prompt-copy{gap:8px}
+.prompt-copy label{color:#a9aaa4;font-size:10px;letter-spacing:.12em}
+.prompt-copy input{color:#fff;font-size:17px}
+.prompt-copy input::placeholder{color:#8d8e88}
+.prompt-copy input:focus-visible{outline:0}
+.prompt-mode{border-color:#62635e;color:#b5b6af;background:#1b1c1a;font-size:8px;padding:8px 10px}
+.composer-submit{width:72px;height:72px;background:var(--acid);color:#111210;font-size:30px}
+.composer-submit:hover:not(:disabled){background:#e8ff9a;transform:translateY(-2px)}
+.composer-submit:disabled{background:var(--acid);color:#111210;opacity:.5}
+.is-landing .composer-meta{display:none}
+.is-landing footer{margin-top:auto}
+.has-workspace .topbar{height:78px;border-bottom:1px solid var(--line)}
+.has-workspace .intro{padding:42px 0 30px}
+.has-workspace .intro h1{font-size:clamp(54px,5.5vw,86px)}
+.has-workspace .composer{margin-bottom:18px;padding:18px;border-radius:34px}
+.has-workspace .prompt-field{min-height:76px;padding:12px 18px}
+.has-workspace .prompt-plus{width:38px;height:38px;flex-basis:38px;font-size:19px}
+.has-workspace .composer-submit{width:56px;height:56px;font-size:23px}
+.has-workspace .composer-fields{grid-template-columns:minmax(0,1.08fr) minmax(320px,.82fr) 60px;gap:12px}
+.has-workspace .composer-meta{border-color:#333430}
+.has-workspace .platforms{color:#9d9e97}
+.has-workspace .platforms i{background:#5b5c57}
+.has-workspace .composer-links button{color:#d7d8d1}
+footer{margin-top:46px;border-top:1px solid rgba(17,18,16,.1)}
+.footer-logo{gap:7px;letter-spacing:.13em}
+.footer-logo i{width:6px;height:6px}
+
+@media(max-width:900px){
+  .app-shell{padding:0 24px}
+  .topbar{height:88px}
+  .intro{padding:70px 0 42px}
+  .intro h1{font-size:clamp(68px,12vw,104px)}
+  .composer{padding:20px;border-radius:38px}
+  .composer-fields{grid-template-columns:1fr 68px;gap:14px}
+  .prompt-field{min-height:86px}
+  .prompt-field-focus{grid-column:1;grid-row:2;border-top:2px solid #6c6d68}
+  .composer-submit{grid-column:2;grid-row:1 / span 2;width:62px;height:62px}
+  .has-workspace .composer-fields{grid-template-columns:1fr 58px}
+  .has-workspace .prompt-field-focus{border-top:2px solid #6c6d68}
+}
+
+@media(max-width:620px){
+  .app-shell{padding:0 14px}
+  .topbar{height:76px}
+  .hero-logo{font-size:17px;letter-spacing:.13em}
+  .hero-logo i{width:7px;height:7px}
+  .intro{padding:56px 0 32px}
+  .intro h1{font-size:clamp(56px,17vw,82px);line-height:.92}
+  .composer{padding:13px;border-radius:30px}
+  .composer-fields{grid-template-columns:1fr}
+  .prompt-field{min-height:78px;padding:13px 15px;border-radius:24px}
+  .prompt-field-focus{grid-column:1;grid-row:auto}
+  .prompt-plus{width:39px;height:39px;flex-basis:39px;font-size:20px}
+  .prompt-copy input{font-size:14px}
+  .composer-submit,.has-workspace .composer-submit{grid-column:1;grid-row:auto;width:56px;height:56px;justify-self:end}
+  .has-workspace .intro{padding:32px 0 23px}
+  .has-workspace .composer{padding:12px;border-radius:28px}
+  .has-workspace .composer-fields{grid-template-columns:1fr}
+  .has-workspace .prompt-field{min-height:72px}
+  footer{margin-top:34px}
+}

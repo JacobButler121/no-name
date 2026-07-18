@@ -23,7 +23,6 @@ test("server-renders the Spotted experience", async () => {
   assert.match(html, /Paste a YouTube, TikTok, or Instagram link/);
   assert.match(html, /What should Spotted look for\?/);
   assert.doesNotMatch(html, /AI product discovery|Shop what you watch/);
-  assert.match(html, /Searches with evidence/);
   assert.match(html, /Upload a video instead/);
   assert.doesNotMatch(html, /SceneCart|Starter Project|codex-preview/);
 });

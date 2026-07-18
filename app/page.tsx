@@ -507,10 +507,10 @@ export default function Home() {
   const currentBox = currentAppearance?.boundingBox;
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${workspaceVisible ? "has-workspace" : "is-landing"}`}>
       <header className="topbar">
-        <button className="logo logo-button" type="button" onClick={() => void newSearch()} aria-label="Spotted home"><span className="logo-mark">S</span>Spotted</button>
-        <button className="header-action" onClick={() => void newSearch()}>New search <span>＋</span></button>
+        <button className="logo logo-button hero-logo" type="button" onClick={() => void newSearch()} aria-label="Spotted home"><span>Spotted</span><i aria-hidden="true" /></button>
+        {workspaceVisible && <button className="header-action" onClick={() => void newSearch()}>New search <span>＋</span></button>}
       </header>
 
       <section className="intro" id="top">
@@ -558,14 +558,6 @@ export default function Home() {
           <div><strong>{status === "blocked" ? "The platform blocked this link" : "The scan couldn’t start"}</strong><p>{error}</p></div>
           <button onClick={() => fileRef.current?.click()}>Upload video <span>↑</span></button>
         </div>
-      )}
-
-      {status === "idle" && (
-        <section className="honest-empty" aria-label="How Spotted works">
-          <article><span>01</span><h2>Understands scenes</h2><p>Samples key moments and reads visual details, labels, and context.</p></article>
-          <article><span>02</span><h2>Resolves repeats</h2><p>One product card keeps every timestamp where the same item appears.</p></article>
-          <article><span>03</span><h2>Searches with evidence</h2><p>Exact matches stay separate from alternatives and possible finds.</p></article>
-        </section>
       )}
 
       {workspaceVisible && (
@@ -620,7 +612,7 @@ export default function Home() {
       )}
 
       {workspaceVisible && <button className="mobile-toggle" onClick={() => setMobileResults((value) => !value)}>{mobileResults ? "Show video" : `Show ${mainProducts.length} matches`} <span>↗</span></button>}
-      <footer><div className="logo footer-logo"><span className="logo-mark">S</span>Spotted</div><p>Spotted studies the scenes, identifies what matters, and finds the closest products you can actually buy.</p><span>Built for the OpenAI hackathon · 2026</span></footer>
+      <footer><div className="logo footer-logo"><span>Spotted</span><i aria-hidden="true" /></div><p>Spotted studies the scenes, identifies what matters, and finds the closest products you can actually buy.</p><span>Built for the OpenAI hackathon · 2026</span></footer>
     </main>
   );
 }
