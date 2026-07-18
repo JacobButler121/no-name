@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
+import urllib.parse
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,6 +19,7 @@ from processor.models import (
     ProductCandidate,
 )
 from processor.search import RetailerSearchService
+from processor.search.lens import GoogleLensSearchClient, LensCandidate
 from processor.search.validation import ProductPageMetadata
 
 
@@ -52,6 +55,98 @@ class FakeClient:
     def create_json(self, payload: dict) -> dict:
         self.payloads.append(payload)
         return self.responses.pop(0)
+
+
+class FakeLensClient:
+    enabled = True
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str | None, int]] = []
+
+    def public_crop_url(self, thumbnail_url: str | None, crop_name: str) -> str | None:
+        return f"https://spotted.example/api/jobs/demo/crops/{crop_name}"
+
+    def public_frame_url(self, thumbnail_url: str | None) -> str | None:
+        return f"https://spotted.example{thumbnail_url}"
+
+    def search(self, image_url: str, *, query: str | None = None, limit: int = 8) -> list[LensCandidate]:
+        self.calls.append((image_url, query, limit))
+        return [
+            LensCandidate(
+                title="Green ceramic vessel table lamp",
+                link="https://lighting.example/green-vessel-lamp",
+                source="Lighting Store",
+                image_url="https://lighting.example/green-vessel-lamp.jpg",
+                price="$299",
+            )
+        ]
+
+
+class FakeHTTPResponse:
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return json.dumps(self.payload).encode("utf-8")
+
+
+class LensClientTests(unittest.TestCase):
+    def test_lens_is_optional_and_requires_a_public_https_origin(self) -> None:
+        self.assertFalse(
+            GoogleLensSearchClient(api_key="", public_base_url="https://spotted.example").enabled
+        )
+        self.assertFalse(
+            GoogleLensSearchClient(api_key="key", public_base_url="http://localhost:3000").enabled
+        )
+
+    def test_lens_parses_and_deduplicates_visual_matches(self) -> None:
+        requests = []
+
+        def opener(request, **_kwargs):
+            requests.append(request)
+            return FakeHTTPResponse(
+                {
+                    "visual_matches": [
+                        {
+                            "title": "Green ceramic vessel table lamp",
+                            "link": "https://lighting.example/green-lamp",
+                            "source": "Lighting Store",
+                            "image": "https://lighting.example/green-lamp.jpg",
+                            "price": {"value": "$299"},
+                            "exact_matches": True,
+                        },
+                        {
+                            "title": "Duplicate",
+                            "link": "https://lighting.example/green-lamp",
+                        },
+                        {"title": "Unsafe", "link": "http://localhost/item"},
+                    ]
+                }
+            )
+
+        client = GoogleLensSearchClient(
+            api_key="serp-key",
+            public_base_url="https://spotted.example",
+            opener=opener,
+        )
+        result = client.search(
+            "https://spotted.example/api/jobs/one/crops/lamp.jpg",
+            query="green ceramic lamp",
+        )
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].price, "$299")
+        self.assertTrue(result[0].exact_hint)
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(requests[0].full_url).query)
+        self.assertEqual(query["engine"], ["google_lens"])
+        self.assertEqual(query["type"], ["visual_matches"])
+        self.assertEqual(query["q"], ["green ceramic lamp"])
 
 
 class ModelContractTests(unittest.TestCase):
@@ -335,6 +430,42 @@ class LivePipelineTests(unittest.TestCase):
 
 
 class RetailSearchTests(unittest.TestCase):
+    def test_google_lens_candidates_seed_the_openai_search_once_per_product(self) -> None:
+        fake_openai = FakeClient([{"matches": []}])
+        fake_lens = FakeLensClient()
+        with tempfile.TemporaryDirectory() as directory:
+            frame = Path(directory) / "frame-0001.jpg"
+            frame.write_bytes(b"frame")
+            detected = candidate(
+                "lamp",
+                name="green ceramic vessel table lamp",
+                category="lamp",
+                brand=None,
+                model=None,
+            )
+            detected.color = "green"
+            detected.material = "ceramic"
+            detected.appearances[0] = Appearance(
+                start_sec=7.0,
+                evidence="Green ceramic lamp with a white drum shade",
+                thumbnail_url="/api/jobs/demo/frames/frame-0001.jpg",
+                bounding_box=BoundingBox(x=0.4, y=0.1, width=0.25, height=0.6),
+                source_path=str(frame),
+            )
+            service = RetailerSearchService(
+                client=fake_openai,
+                lens_client=fake_lens,
+                metadata_fetcher=lambda *args, **kwargs: None,
+            )
+            finding = service.enrich(detected)
+
+        self.assertEqual(finding.match_kind, MatchKind.POSSIBLE)
+        self.assertEqual(len(fake_lens.calls), 1)
+        search_prompt = fake_openai.payloads[0]["input"][0]["content"][0]["text"]
+        self.assertIn("Google Lens candidates", search_prompt)
+        self.assertIn("Green ceramic vessel table lamp", search_prompt)
+        self.assertIn("https://lighting.example/green-vessel-lamp", search_prompt)
+
     def test_exact_match_requires_brand_model_and_verified_page(self) -> None:
         fake = FakeClient(
             [

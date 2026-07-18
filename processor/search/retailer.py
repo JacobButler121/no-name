@@ -22,6 +22,7 @@ from processor.models import (
 )
 
 from .validation import ProductPageMetadata, validate_product_url
+from .lens import GoogleLensSearchClient, LensCandidate
 
 
 EventCallback = Callable[[str, dict[str, Any]], None]
@@ -154,7 +155,7 @@ def _frame_data_url(path_value: str) -> str | None:
     return f"data:{mime_type};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
 
 
-def _cropped_frame_data_url(path_value: str, bounding_box: Any) -> str | None:
+def _cropped_frame_path(path_value: str, bounding_box: Any) -> Path | None:
     """Return a padded crop of the detected object, falling back to the frame.
 
     The crop is written inside the temporary job directory, so normal job cleanup
@@ -162,7 +163,8 @@ def _cropped_frame_data_url(path_value: str, bounding_box: Any) -> str | None:
     """
 
     if bounding_box is None:
-        return _frame_data_url(path_value)
+        source = Path(path_value)
+        return source if source.is_file() else None
     source = Path(path_value)
     if not source.is_file():
         return None
@@ -173,7 +175,7 @@ def _cropped_frame_data_url(path_value: str, bounding_box: Any) -> str | None:
     width = min(1.0 - x, box["width"] * (1 + padding * 2))
     height = min(1.0 - y, box["height"] * (1 + padding * 2))
     if width <= 0.01 or height <= 0.01:
-        return _frame_data_url(path_value)
+        return source
 
     crop_dir = source.parent / "crops"
     crop_name = (
@@ -184,7 +186,7 @@ def _cropped_frame_data_url(path_value: str, bounding_box: Any) -> str | None:
     if not target.is_file():
         ffmpeg = os.getenv("FFMPEG_PATH") or shutil.which("ffmpeg")
         if not ffmpeg:
-            return _frame_data_url(path_value)
+            return source
         try:
             crop_dir.mkdir(parents=True, exist_ok=True)
             subprocess.run(
@@ -211,8 +213,13 @@ def _cropped_frame_data_url(path_value: str, bounding_box: Any) -> str | None:
             )
         except (OSError, subprocess.SubprocessError):
             target.unlink(missing_ok=True)
-            return _frame_data_url(path_value)
-    return _frame_data_url(str(target))
+            return source
+    return target
+
+
+def _cropped_frame_data_url(path_value: str, bounding_box: Any) -> str | None:
+    path = _cropped_frame_path(path_value, bounding_box)
+    return _frame_data_url(str(path)) if path else None
 
 
 def _emit(callback: EventCallback | None, event_type: str, payload: dict[str, Any]) -> None:
@@ -230,6 +237,7 @@ class RetailerSearchService:
         target_crop_limit: int = 3,
         match_model: str | None = None,
         image_detail: str | None = None,
+        lens_client: GoogleLensSearchClient | None = None,
     ) -> None:
         if not 1 <= candidate_limit <= 8:
             raise ValueError("candidate_limit must be between 1 and 8")
@@ -245,6 +253,7 @@ class RetailerSearchService:
         self.image_detail = image_detail or os.getenv(
             "SPOTTED_MATCH_IMAGE_DETAIL", "original"
         )
+        self.lens_client = lens_client or GoogleLensSearchClient()
         if self.image_detail not in {"high", "original"}:
             raise ValueError("image_detail must be high or original")
 
@@ -291,6 +300,47 @@ class RetailerSearchService:
                 break
         return crops
 
+    def _lens_candidates(
+        self,
+        candidate: ProductCandidate,
+        target_crops: list[tuple[Appearance, str]],
+    ) -> list[LensCandidate]:
+        """Run one reverse-image lookup for the strongest crop, never per frame."""
+        if not self.lens_client.enabled or not target_crops:
+            return []
+        appearance = target_crops[0][0]
+        crop_path = _cropped_frame_path(
+            appearance.source_path or "", appearance.bounding_box
+        )
+        if not crop_path:
+            return []
+        if crop_path.parent.name == "crops":
+            public_url = self.lens_client.public_crop_url(
+                appearance.thumbnail_url, crop_path.name
+            )
+        else:
+            public_url = self.lens_client.public_frame_url(
+                appearance.thumbnail_url
+            )
+        if not public_url:
+            return []
+        query = " ".join(
+            value
+            for value in (
+                candidate.brand,
+                candidate.model,
+                candidate.color,
+                candidate.material,
+                candidate.name,
+            )
+            if value
+        )
+        return self.lens_client.search(
+            public_url,
+            query=query,
+            limit=self.candidate_limit,
+        )
+
     def search(self, candidate: ProductCandidate) -> list[RetailMatch]:
         evidence = "; ".join(
             appearance.evidence for appearance in candidate.appearances[:5] if appearance.evidence
@@ -308,13 +358,17 @@ class RetailerSearchService:
             "detectionConfidence": candidate.confidence,
         }
         target_crops = self._target_crops(candidate)
+        lens_candidates = self._lens_candidates(candidate, target_crops)
         content: list[dict[str, Any]] = [
             {
                 "type": "input_text",
                 "text": (
                     f"Find up to {self.candidate_limit} distinct, defensible product-page candidates. "
                     "Inspect all target crops before searching. Preserve visual contradictions for the final verifier.\n"
-                    f"TARGET FINGERPRINT: {json.dumps(query_context, ensure_ascii=True, sort_keys=True)}"
+                    f"TARGET FINGERPRINT: {json.dumps(query_context, ensure_ascii=True, sort_keys=True)}\n"
+                    "Google Lens candidates are visual retrieval leads, not verified matches. "
+                    "Check their product pages and reject accessories, category neighbors, and visual contradictions.\n"
+                    f"LENS CANDIDATES: {json.dumps([item.to_prompt_dict() for item in lens_candidates], ensure_ascii=True)}"
                 ),
             }
         ]
