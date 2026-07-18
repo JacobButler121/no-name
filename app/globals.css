@@ -191,3 +191,115 @@ footer{margin-top:46px;border-top:1px solid rgba(17,18,16,.1)}
   .has-workspace .composer{padding:0;max-height:0;border-radius:20px}
   footer{margin-top:34px}
 }
+
+/* Final interaction pass: crisp inputs, a calmer handoff, and one rounded workspace. */
+.intro h1{
+  font-family:var(--font-geist-sans),Arial,sans-serif;
+  font-weight:780;
+  letter-spacing:-.065em;
+}
+
+.prompt-copy input,
+.prompt-copy input:focus,
+.prompt-copy input:active{
+  appearance:none;
+  -webkit-appearance:none;
+  background:transparent!important;
+  color:#fff!important;
+  caret-color:var(--acid);
+  box-shadow:none!important;
+}
+.prompt-copy input::selection{
+  background:rgba(223,255,117,.24);
+  color:#fff;
+}
+.prompt-copy input::-moz-selection{
+  background:rgba(223,255,117,.24);
+  color:#fff;
+}
+.prompt-copy input:-webkit-autofill,
+.prompt-copy input:-webkit-autofill:hover,
+.prompt-copy input:-webkit-autofill:focus{
+  -webkit-text-fill-color:#fff!important;
+  -webkit-box-shadow:0 0 0 1000px #252624 inset!important;
+  caret-color:var(--acid);
+  transition:background-color 9999s ease-out 0s;
+}
+.prompt-field-focus .prompt-copy input:-webkit-autofill,
+.prompt-field-focus .prompt-copy input:-webkit-autofill:hover,
+.prompt-field-focus .prompt-copy input:-webkit-autofill:focus{
+  -webkit-box-shadow:0 0 0 1000px #111210 inset!important;
+}
+
+.has-workspace .intro{
+  transition-duration:.4s,.4s,.22s,.3s;
+}
+.has-workspace .composer{
+  max-height:0;
+  padding-top:0;
+  padding-bottom:0;
+  opacity:0;
+  transform:translateY(6px) scaleX(1.025) scaleY(.88);
+  transition:max-height .38s cubic-bezier(.4,0,.2,1),
+    padding .38s cubic-bezier(.4,0,.2,1),
+    margin .38s cubic-bezier(.4,0,.2,1),
+    border-radius .28s ease,
+    opacity .18s ease,
+    transform .34s cubic-bezier(.4,0,.2,1),
+    box-shadow .25s ease;
+}
+.has-workspace .workspace{
+  border-radius:28px;
+  overflow:hidden;
+  transform-origin:center top;
+  animation:workspace-morph-in .64s cubic-bezier(.22,.76,.2,1) .04s both;
+}
+
+@keyframes workspace-morph-in{
+  0%{
+    opacity:.18;
+    transform:translateY(-12px) scale(.985);
+    clip-path:inset(0 6% 82% 6% round 36px);
+  }
+  34%{
+    opacity:.82;
+    transform:translateY(-4px) scale(.995);
+    clip-path:inset(0 2% 52% 2% round 32px);
+  }
+  100%{
+    opacity:1;
+    transform:translateY(0) scale(1);
+    clip-path:inset(0 0 0 0 round 28px);
+  }
+}
+
+.real-video-stage .youtube-player,
+.real-video-stage video{
+  opacity:0;
+  transform:scale(1.012);
+  transition:opacity .34s ease,transform .55s cubic-bezier(.22,.76,.2,1);
+}
+.real-video-stage.is-playable .youtube-player,
+.real-video-stage.is-playable video{
+  opacity:1;
+  transform:scale(1);
+}
+.video-loading{
+  z-index:7;
+  opacity:1;
+  visibility:visible;
+  pointer-events:none;
+  transition:opacity .28s ease,visibility 0s linear .28s;
+}
+.real-video-stage.is-playable .video-loading{
+  opacity:0;
+  visibility:hidden;
+}
+
+@media(max-width:900px){
+  .has-workspace .workspace{border-radius:24px}
+}
+@media(max-width:620px){
+  .intro h1{letter-spacing:-.055em}
+  .has-workspace .workspace{border-radius:20px}
+}

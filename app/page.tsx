@@ -213,7 +213,8 @@ export default function Home() {
   const pendingSeekRef = useRef<number | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  const youtubeId = platform === "youtube" ? youtubeVideoId(sourceUrl || url) : null;
+  const pastedYoutubeId = youtubeVideoId(url);
+  const youtubeId = youtubeVideoId(sourceUrl);
   const mainProducts = products.filter((product) => product.matchKind !== "possible" && Boolean(product.productUrl));
   const unmatchedProducts = products.filter((product) => !product.productUrl);
   const activeProduct = mainProducts.find((product) => product.id === activeId) ?? mainProducts[0];
@@ -221,6 +222,13 @@ export default function Home() {
   const progress = status === "complete" ? 100 : Math.max(6, ((Math.max(0, progressIndex) + 1) / eventOrder.length) * 100);
 
   useEffect(() => () => streamRef.current?.close(), []);
+
+  useEffect(() => {
+    if (!pastedYoutubeId) return;
+    // Warm the player API while the user is still in the composer so the
+    // submitted video can replace the search surface immediately.
+    void loadYouTubeAPI().catch(() => undefined);
+  }, [pastedYoutubeId]);
 
   useEffect(() => {
     const stage = videoStageRef.current;
@@ -568,7 +576,7 @@ export default function Home() {
               <div><span className="step-number">01</span><div><strong>Video</strong><small>{jobId ? `${platform} · Job ${jobId.slice(0, 8)}` : "Creating secure session"}</small></div></div>
               <span className="source-badge">{focus.trim() ? "Focused analysis" : "Live analysis"}</span>
             </div>
-            <div ref={videoStageRef} className="video-stage real-video-stage">
+            <div ref={videoStageRef} className={`video-stage real-video-stage ${videoReady ? "is-playable" : "is-loading"}`}>
               {youtubeId ? (
                 <div
                   ref={youtubeHostRef}
@@ -578,7 +586,11 @@ export default function Home() {
               ) : jobId && mediaAvailable ? (
                 <video ref={videoRef} controls playsInline preload="metadata" src={`/api/jobs/${encodeURIComponent(jobId)}/media`} onCanPlay={(event) => { setVideoReady(true); if (event.currentTarget.videoWidth && event.currentTarget.videoHeight) setVideoDimensions({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight }); }} onTimeUpdate={(event) => { setCurrentTime(event.currentTarget.currentTime); if (activeAppearance && Math.abs(event.currentTarget.currentTime - activeAppearance.startSec) > 3) setActiveAppearance(null); }} />
               ) : null}
-              {!videoReady && <div className="video-loading"><div className="scan-orbit"><span>AI</span><i /><i /><i /></div><strong>Preparing playback</strong><small>The first frames will appear here.</small></div>}
+              <div className="video-loading" aria-hidden={videoReady}>
+                <div className="scan-orbit"><span>AI</span><i /><i /><i /></div>
+                <strong>{youtubeId ? "Opening YouTube playback" : "Preparing playback"}</strong>
+                <small>{youtubeId ? "The player is loading while Spotted starts its scan." : "The first frames will appear here."}</small>
+              </div>
               {currentBox && videoReady && activeProduct && <div className="detection-layer" style={videoRect}><div className="detection-box" style={{ left: `${currentBox.x * 100}%`, top: `${currentBox.y * 100}%`, width: `${currentBox.width * 100}%`, height: `${currentBox.height * 100}%` }}><span>{activeProduct.name} · {productPercent(activeProduct.matchConfidence ?? activeProduct.confidence)}%</span></div></div>}
             </div>
             <div className="moments">
