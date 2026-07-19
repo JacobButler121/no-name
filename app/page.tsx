@@ -721,7 +721,7 @@ export default function Home() {
       </div>
 
       {workspaceVisible && <button className="mobile-toggle" onClick={() => setMobileResults((value) => !value)}>{mobileResults ? "Show video" : `Show ${linkedProducts.length} matches`} <span>↗</span></button>}
-      <footer><div className="logo footer-logo"><span>Spotted</span><i aria-hidden="true" /></div><span>Built for the OpenAI hackathon · 2026</span></footer>
+      <footer><span>Built for the OpenAI hackathon · 2026</span></footer>
     </main>
   );
 }

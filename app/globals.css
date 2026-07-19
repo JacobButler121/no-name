@@ -77,15 +77,13 @@ button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid var(-
 .platforms i{background:#c2c2bc}
 .composer-links button{color:#55554f}
 .honest-empty{margin-top:52px}
-footer{height:auto;min-height:112px;padding:27px 0;grid-template-columns:1fr 1fr;column-gap:28px}
-footer>span{justify-self:end}
+footer{height:auto;min-height:112px;padding:27px 0;display:flex;justify-content:flex-end}
 
 @media(max-width:900px){
   .intro{padding:68px 2px 35px}
   .composer-fields{grid-template-columns:minmax(0,1fr) 58px}
   .prompt-field-focus{grid-column:1;grid-row:2;border-left:0;border-top:1px solid #e4e4df}
   .composer-submit{grid-column:2;grid-row:1 / span 2;align-self:center}
-  footer{grid-template-columns:1fr 1fr}
 }
 
 @media(max-width:620px){
@@ -101,7 +99,7 @@ footer>span{justify-self:end}
   .composer-submit{width:46px;height:46px}
   .composer-meta{padding:9px 6px 2px}
   .honest-empty{margin-top:38px}
-  footer{min-height:112px;grid-template-columns:1fr auto;align-content:center}
+  footer{min-height:112px}
 }
 
 /* Consecutive one-second detections are presented as concise sighting windows. */
