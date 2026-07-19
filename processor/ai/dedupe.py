@@ -192,13 +192,17 @@ def _similarity(left: ProductCandidate, right: ProductCandidate) -> float:
     if left_text and right_text and left_text & right_text:
         return 0.98
     if left.instance_key and right.instance_key:
-        if _normalized(left.instance_key) == _normalized(right.instance_key):
-            return 1.0
-        # Instance keys are authoritative only inside one model request. The
-        # model cannot coordinate key names across independently analyzed batches.
         left_batch, right_batch = _batch_id(left), _batch_id(right)
-        if not left_batch or not right_batch or left_batch == right_batch:
-            return 0.0
+        same_request = not left_batch or not right_batch or left_batch == right_batch
+        if same_request:
+            return (
+                1.0
+                if _normalized(left.instance_key) == _normalized(right.instance_key)
+                else 0.0
+            )
+        # Instance keys are local to one model request. Across batches the model
+        # commonly reuses generic keys such as ``table-lamp`` for unrelated
+        # objects, so cross-batch merging must be decided from visual evidence.
     left_tokens = _tokens(
         left.name, left.brand, left.model, left.color, left.material, left.visual_description
     )

@@ -120,6 +120,10 @@ The same physical item across frames must use the same short instanceKey. Differ
 physical instances—even visually similar ones—must use different instanceKeys. Return
 every frameIndex where it appears in this batch. frameIndex must be copied from the
 label immediately before the corresponding image; never calculate or invent a timestamp.
+When a scene contains a matching pair or set (for example two bedside lamps), return one
+candidate per physical object, with a separate instanceKey and tight bounding box for
+each. Never use plural evidence such as "both lamps" for a candidate whose box encloses
+only one lamp. Symmetry and matching appearance do not make two objects one instance.
 Evidence must briefly describe what is actually visible or spoken. Bounding boxes must
 tightly enclose the named object rather than a person, wall, or whole room. Systematically
 sweep every supplied frame and do not omit a clearly visible background object that
@@ -153,7 +157,7 @@ class ProductAnalysisPipeline:
         batch_size: int = 10,
         detail: str = "high",
         min_confidence: float = 0.7,
-        focused_limit: int = 5,
+        focused_limit: int = 8,
         broad_limit: int = 8,
     ) -> None:
         if not 1 <= batch_size <= 20:

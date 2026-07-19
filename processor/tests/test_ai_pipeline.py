@@ -353,6 +353,36 @@ class DedupeTests(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual([item.start_sec for item in result[0].appearances], [10.0, 55.0])
 
+    def test_reused_generic_instance_key_across_batches_does_not_force_merge(self) -> None:
+        white = candidate(
+            "batch-1-candidate-1",
+            name="table lamp",
+            category="lamp",
+            brand=None,
+            model=None,
+            timestamp=217.0,
+            instance_key="table-lamp",
+        )
+        white.visual_description = "Glossy white spherical ceramic base and broad tapered shade"
+        gray = candidate(
+            "batch-2-candidate-1",
+            name="table lamp",
+            category="lamp",
+            brand=None,
+            model=None,
+            timestamp=458.0,
+            instance_key="table-lamp",
+        )
+        gray.visual_description = "Tall gray stone base with a narrow rectangular shade"
+
+        result = deduplicate_candidates([white, gray])
+
+        self.assertEqual(len(result), 2)
+
+    def test_detection_prompt_requires_matching_pairs_to_be_separate(self) -> None:
+        self.assertIn("matching pair", SYSTEM_PROMPT)
+        self.assertIn("one candidate per physical object", SYSTEM_PROMPT)
+
     def test_visually_conflicting_colors_do_not_merge(self) -> None:
         pale = candidate(
             "batch-1-candidate-1",
