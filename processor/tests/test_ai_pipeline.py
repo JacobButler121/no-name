@@ -15,6 +15,7 @@ from processor.ai.dedupe import deduplicate_candidates
 from processor.ai.pipeline import ProductAnalysisPipeline, SYSTEM_PROMPT, _select_candidates
 from processor.models import (
     AnalysisConfigurationError,
+    AnalysisError,
     Appearance,
     BoundingBox,
     FrameManifest,
@@ -52,13 +53,16 @@ def candidate(
 
 
 class FakeClient:
-    def __init__(self, responses: list[dict]):
+    def __init__(self, responses: list[dict | Exception]):
         self.responses = list(responses)
         self.payloads: list[dict] = []
 
     def create_json(self, payload: dict) -> dict:
         self.payloads.append(payload)
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 class FakeLensClient:
@@ -871,6 +875,89 @@ class RetailSearchTests(unittest.TestCase):
             any(item.get("type") == "input_image" for item in search_content)
         )
         self.assertEqual(fake.payloads[0]["model"], "gpt-5.6-terra")
+
+    def test_blocked_retailer_image_does_not_fail_entire_scan(self) -> None:
+        blocked_image_error = AnalysisError(
+            'OpenAI Responses API returned HTTP 400: {"error": {'
+            '"message": "Error while downloading file. Upstream status code: 403.", '
+            '"param": "url"}}'
+        )
+        fake = FakeClient(
+            [
+                {
+                    "matches": [
+                        {
+                            "productName": "Blocked Lamp",
+                            "retailerName": "Blocked Store",
+                            "productUrl": "https://blocked.example/lamp",
+                            "matchKind": "similar",
+                            "confidence": 0.9,
+                            "evidence": "Plausible lamp",
+                        },
+                        {
+                            "productName": "Accessible Lamp",
+                            "retailerName": "Accessible Store",
+                            "productUrl": "https://accessible.example/lamp",
+                            "matchKind": "similar",
+                            "confidence": 0.88,
+                            "evidence": "Matching round base and shade",
+                        },
+                    ]
+                },
+                blocked_image_error,
+                blocked_image_error,
+                {
+                    "comparisons": [
+                        {
+                            "index": 0,
+                            "verdict": "similar",
+                            "confidence": 0.86,
+                            "categoryMatch": "match",
+                            "shapeMatch": "match",
+                            "colorMatch": "match",
+                            "materialMatch": "match",
+                            "constructionMatch": "match",
+                            "identityEvidence": False,
+                            "contradictions": [],
+                            "evidence": "Round base and tapered shade agree",
+                        }
+                    ]
+                },
+            ]
+        )
+
+        def metadata(url: str, **_: object) -> ProductPageMetadata:
+            host = "blocked" if "blocked.example" in url else "accessible"
+            return ProductPageMetadata(
+                url=url,
+                title=f"{host.title()} Lamp",
+                image_url=f"https://{host}.example/lamp.jpg",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            frame = Path(directory) / "frame.jpg"
+            frame.write_bytes(b"frame")
+            detected = candidate(
+                "lamp",
+                name="white round table lamp",
+                category="lamp",
+                brand=None,
+                model=None,
+            )
+            detected.appearances[0] = Appearance(
+                start_sec=1.0,
+                evidence="White round table lamp",
+                bounding_box=BoundingBox(x=0.2, y=0.1, width=0.35, height=0.65),
+                source_path=str(frame),
+            )
+            result = RetailerSearchService(
+                client=fake,
+                metadata_fetcher=metadata,
+            ).enrich(detected)
+
+        self.assertEqual(result.product_url, "https://accessible.example/lamp")
+        self.assertEqual(result.match_kind, MatchKind.SIMILAR)
+        self.assertEqual(len(fake.payloads), 4)
 
     def test_plausible_visual_candidate_is_linked_as_possible_not_verified(self) -> None:
         fake = FakeClient(

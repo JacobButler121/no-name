@@ -234,6 +234,15 @@ def _emit(callback: EventCallback | None, event_type: str, payload: dict[str, An
         callback(event_type, payload)
 
 
+def _is_inaccessible_image_error(exc: AnalysisError) -> bool:
+    """Identify Responses API failures caused by a retailer blocking its image URL."""
+    message = str(exc).casefold()
+    return (
+        "error while downloading file" in message
+        and ("upstream status code: 403" in message or '"param": "url"' in message)
+    )
+
+
 class RetailerSearchService:
     def __init__(
         self,
@@ -716,7 +725,26 @@ class RetailerSearchService:
                 }
             },
         }
-        result = self.client.create_json(payload)
+        try:
+            result = self.client.create_json(payload)
+        except AnalysisError as exc:
+            if not _is_inaccessible_image_error(exc):
+                raise
+            # A single hotlink-protected merchant image makes the Responses API
+            # reject the whole multimodal request. Retry candidates separately so
+            # only the inaccessible image is discarded, not the entire scan.
+            if len(comparable) == 1:
+                return []
+            accepted: list[RetailMatch] = []
+            for match in comparable:
+                accepted.extend(
+                    self._visually_verify(
+                        candidate,
+                        [match],
+                        target_crops=crops,
+                    )
+                )
+            return sorted(accepted, key=lambda item: item.confidence, reverse=True)
         raw_comparisons = result.get("comparisons")
         if not isinstance(raw_comparisons, list):
             return []
