@@ -1,0 +1,6 @@
+:root { color-scheme: dark; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; display: grid; place-items: center; color: #d7ff83; background: #111; }
+main { max-width: 36rem; padding: 2rem; border: 1px solid #394526; border-radius: 1rem; }
+h1 { margin-top: 0; font-size: 1.2rem; }
+p { margin-bottom: 0; color: #a6ae98; }
