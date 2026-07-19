@@ -43,6 +43,7 @@ class YtDlpRetriever:
             "bv*[height<=720]+ba/b[height<=720]/b",
             "--merge-output-format",
             "mp4",
+            "--write-info-json",
             "--output",
             str(output_template),
             "--print",

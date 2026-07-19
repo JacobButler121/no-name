@@ -43,6 +43,7 @@ class JobRecord:
     metadata: dict[str, Any] = field(default_factory=dict)
     frames: list[dict[str, Any]] = field(default_factory=list)
     findings: list[dict[str, Any]] = field(default_factory=list)
+    retrieval_diagnostics: dict[str, dict[str, Any]] = field(default_factory=dict)
     error: dict[str, Any] | None = None
     events: list[JobEvent] = field(default_factory=list)
     next_sequence: int = 1
@@ -57,6 +58,7 @@ class JobRecord:
             "metadata": self.metadata,
             "frames": self.frames,
             "findings": self.findings,
+            "retrievalDiagnostics": list(self.retrieval_diagnostics.values()),
             "mediaUrl": f"/api/jobs/{self.id}/media" if self.source_path else None,
             "eventsUrl": f"/api/jobs/{self.id}/events",
         }
@@ -116,6 +118,14 @@ class JobStore:
             event = JobEvent(job.next_sequence, event_type, data)
             job.next_sequence += 1
             job.events.append(event)
+            if event_type == "retailer_search_diagnostics":
+                candidate_id = str(data.get("candidateId") or "").strip()
+                if candidate_id:
+                    # The producer emits only enumerated diagnostic codes and
+                    # generic messages. Keeping this separate from findings
+                    # makes failed retrieval observable without exposing URLs,
+                    # crop paths, API responses, or credentials.
+                    job.retrieval_diagnostics[candidate_id] = dict(data)
             job.updated_at = time.time()
             if event_type in {
                 "retrieving_video",

@@ -209,6 +209,12 @@ class ProductAnalysisPipeline:
                     },
                 )
         merged = deduplicate_candidates(candidates)
+        for candidate in merged:
+            candidate.source_url = parsed.source_url
+            candidate.source_title = parsed.source_title
+            candidate.source_channel = parsed.source_channel
+            candidate.source_platform = parsed.source_platform
+            candidate.search_focus = parsed.search_focus
         selected = _select_candidates(
             merged,
             limit=self.focused_limit if parsed.search_focus else self.broad_limit,

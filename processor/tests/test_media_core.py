@@ -44,6 +44,33 @@ class JobStoreTests(unittest.TestCase):
             self.assertEqual(store.cleanup_expired(), [job.id])
             self.assertFalse(job.directory.exists())
 
+    def test_retrieval_diagnostics_are_persisted_in_job_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = JobStore(Path(temporary))
+            job = store.create()
+            store.emit(
+                job.id,
+                "retailer_search_diagnostics",
+                candidateId="lamp-one",
+                counts={"lensCandidates": 0, "verifiedMatches": 0},
+                reasons=[{
+                    "stage": "relay_upload",
+                    "status": "error",
+                    "code": "relay_network_error",
+                    "message": "The crop could not be uploaded to the public relay.",
+                    "retryable": True,
+                }],
+            )
+
+            state = json.loads((job.directory / "job.json").read_text())
+            self.assertEqual(
+                state["retrievalDiagnostics"][0]["candidateId"], "lamp-one"
+            )
+            self.assertEqual(
+                state["retrievalDiagnostics"][0]["reasons"][0]["code"],
+                "relay_network_error",
+            )
+
 
 class RetrieverTests(unittest.TestCase):
     def test_caption_failure_does_not_discard_downloaded_video(self) -> None:
@@ -70,6 +97,7 @@ class RetrieverTests(unittest.TestCase):
             self.assertEqual(run.call_count, 2)
             self.assertIn("--js-runtimes", run.call_args_list[0].args[0])
             self.assertIn("--socket-timeout", run.call_args_list[0].args[0])
+            self.assertIn("--write-info-json", run.call_args_list[0].args[0])
             self.assertEqual(run.call_args_list[0].kwargs["timeout"], None)
             self.assertEqual(run.call_args_list[1].kwargs["timeout"], 90)
 

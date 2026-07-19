@@ -22,7 +22,7 @@ from processor.models import (
 )
 
 from .validation import ProductPageMetadata, validate_product_url
-from .lens import GoogleLensSearchClient, LensCandidate
+from .lens import GoogleLensSearchClient, LensCandidate, LensSearchOutcome
 
 
 EventCallback = Callable[[str, dict[str, Any]], None]
@@ -130,6 +130,10 @@ insufficient. Confidence is confidence that the RETAILER PRODUCT matches the tra
 object, not confidence that the object category was detected. Be conservative."""
 
 
+POSSIBLE_VISUAL_CONFIDENCE = 0.68
+VERIFIED_VISUAL_CONFIDENCE = 0.82
+
+
 _TOKEN_NOISE = {
     "lamp", "lamps", "light", "lighting", "table", "desk", "floor", "wall",
     "ceiling", "pendant", "sconce", "chandelier", "product", "item", "with",
@@ -199,7 +203,10 @@ def _cropped_frame_path(path_value: str, bounding_box: Any) -> Path | None:
                     "-i",
                     str(source),
                     "-vf",
-                    f"crop=iw*{width:.6f}:ih*{height:.6f}:iw*{x:.6f}:ih*{y:.6f}",
+                    (
+                        f"crop=iw*{width:.6f}:ih*{height:.6f}:iw*{x:.6f}:ih*{y:.6f},"
+                        "scale=w='max(iw\\,512)':h=-2:flags=lanczos"
+                    ),
                     "-frames:v",
                     "1",
                     "-q:v",
@@ -304,15 +311,42 @@ class RetailerSearchService:
         self,
         candidate: ProductCandidate,
         target_crops: list[tuple[Appearance, str]],
+        diagnostics: dict[str, Any],
     ) -> list[LensCandidate]:
         """Run one reverse-image lookup for the strongest crop, never per frame."""
-        if not self.lens_client.enabled or not target_crops:
+        if not target_crops:
+            diagnostics["reasons"].append({
+                "stage": "crop_selection",
+                "status": "empty",
+                "code": "no_target_crops",
+                "message": "No usable target crop was available for reverse-image search.",
+                "retryable": False,
+            })
+            return []
+        search_crop_diagnostic = getattr(
+            self.lens_client, "search_crop_with_diagnostics", None
+        )
+        if not self.lens_client.enabled and not callable(search_crop_diagnostic):
+            diagnostics["reasons"].append({
+                "stage": "lens_configuration",
+                "status": "disabled",
+                "code": "lens_disabled",
+                "message": "Google Lens retrieval is not fully configured.",
+                "retryable": False,
+            })
             return []
         appearance = target_crops[0][0]
         crop_path = _cropped_frame_path(
             appearance.source_path or "", appearance.bounding_box
         )
         if not crop_path:
+            diagnostics["reasons"].append({
+                "stage": "crop_selection",
+                "status": "error",
+                "code": "crop_generation_failed",
+                "message": "The selected target crop could not be generated.",
+                "retryable": False,
+            })
             return []
         query = " ".join(
             value
@@ -322,18 +356,42 @@ class RetailerSearchService:
                 candidate.color,
                 candidate.material,
                 candidate.name,
+                candidate.source_channel,
+                candidate.source_title,
+                candidate.search_focus,
             )
             if value
         )
-        search_crop = getattr(self.lens_client, "search_crop", None)
-        if callable(search_crop):
-            relay_results = search_crop(
+        if callable(search_crop_diagnostic):
+            relay_outcome = search_crop_diagnostic(
                 crop_path,
                 query=query,
                 limit=self.candidate_limit,
             )
-            if relay_results or getattr(self.lens_client, "relay_enabled", False):
-                return relay_results
+            if isinstance(relay_outcome, LensSearchOutcome):
+                diagnostics["reasons"].extend(
+                    item.to_dict() for item in relay_outcome.diagnostics
+                )
+                if relay_outcome.candidates:
+                    return list(relay_outcome.candidates)
+                # A successful empty Lens response should not be repeated using
+                # the same image. Transport/API failures may use the legacy
+                # public job URL as a best-effort fallback.
+                diagnostic_codes = {
+                    item.code for item in relay_outcome.diagnostics
+                }
+                if relay_outcome.status == "empty" or "missing_api_key" in diagnostic_codes:
+                    return []
+        else:
+            search_crop = getattr(self.lens_client, "search_crop", None)
+            if callable(search_crop):
+                relay_results = search_crop(
+                    crop_path,
+                    query=query,
+                    limit=self.candidate_limit,
+                )
+                if relay_results or getattr(self.lens_client, "relay_enabled", False):
+                    return relay_results
 
         if crop_path.parent.name == "crops":
             public_url = self.lens_client.public_crop_url(
@@ -344,14 +402,46 @@ class RetailerSearchService:
                 appearance.thumbnail_url
             )
         if not public_url:
+            diagnostics["reasons"].append({
+                "stage": "public_image_url",
+                "status": "error",
+                "code": "public_url_unavailable",
+                "message": "No public crop URL was available for Google Lens.",
+                "retryable": False,
+            })
             return []
-        return self.lens_client.search(
-            public_url,
-            query=query,
-            limit=self.candidate_limit,
-        )
+        search_diagnostic = getattr(self.lens_client, "search_with_diagnostics", None)
+        if callable(search_diagnostic):
+            outcome = search_diagnostic(
+                public_url, query=query, limit=self.candidate_limit
+            )
+            if isinstance(outcome, LensSearchOutcome):
+                diagnostics["reasons"].extend(
+                    item.to_dict() for item in outcome.diagnostics
+                )
+                return list(outcome.candidates)
+        return self.lens_client.search(public_url, query=query, limit=self.candidate_limit)
 
-    def search(self, candidate: ProductCandidate) -> list[RetailMatch]:
+    def search(
+        self,
+        candidate: ProductCandidate,
+        *,
+        diagnostics: dict[str, Any] | None = None,
+    ) -> list[RetailMatch]:
+        report = diagnostics if diagnostics is not None else {}
+        report.update({
+            "candidateId": candidate.id,
+            "counts": {
+                "targetCrops": 0,
+                "lensCandidates": 0,
+                "webCandidates": 0,
+                "validRetailerPages": 0,
+                "visualCandidates": 0,
+                "possibleMatches": 0,
+                "verifiedMatches": 0,
+            },
+            "reasons": [],
+        })
         evidence = "; ".join(
             appearance.evidence for appearance in candidate.appearances[:5] if appearance.evidence
         )
@@ -366,9 +456,18 @@ class RetailerSearchService:
             "visibleText": candidate.visible_text,
             "visualEvidence": evidence,
             "detectionConfidence": candidate.confidence,
+            "sourceContext": {
+                "title": candidate.source_title,
+                "channel": candidate.source_channel,
+                "platform": candidate.source_platform,
+                "url": candidate.source_url,
+                "searchFocus": candidate.search_focus,
+            },
         }
         target_crops = self._target_crops(candidate)
-        lens_candidates = self._lens_candidates(candidate, target_crops)
+        report["counts"]["targetCrops"] = len(target_crops)
+        lens_candidates = self._lens_candidates(candidate, target_crops, report)
+        report["counts"]["lensCandidates"] = len(lens_candidates)
         content: list[dict[str, Any]] = [
             {
                 "type": "input_text",
@@ -421,6 +520,15 @@ class RetailerSearchService:
             for raw in raw_matches[: self.candidate_limit]
             if isinstance(raw, Mapping)
         ]
+        report["counts"]["webCandidates"] = len(raw_items)
+        if not raw_items:
+            report["reasons"].append({
+                "stage": "web_search",
+                "status": "empty",
+                "code": "no_web_candidates",
+                "message": "Shopping web search returned no candidate product pages.",
+                "retryable": False,
+            })
         expected_terms = [
             value
             for value in (
@@ -450,14 +558,20 @@ class RetailerSearchService:
         else:
             metadata_items = []
         verified: list[RetailMatch] = []
+        valid_page_count = 0
+        invalid_page_count = 0
+        low_confidence_count = 0
         for raw, metadata in zip(raw_items, metadata_items, strict=True):
             if metadata is None:
+                invalid_page_count += 1
                 continue
+            valid_page_count += 1
             requested_kind = MatchKind(str(raw.get("matchKind", "similar")))
             # An exact SKU claim is never permitted without both brand and model evidence.
             match_kind = requested_kind if candidate.brand and candidate.model else MatchKind.SIMILAR
             confidence = max(0.0, min(1.0, float(raw.get("confidence", 0))))
             if confidence < 0.5:
+                low_confidence_count += 1
                 continue
             page_tokens = _tokens(metadata.title, str(raw.get("productName", "")))
             identity_tokens = _tokens(candidate.brand, candidate.model)
@@ -475,6 +589,7 @@ class RetailerSearchService:
             if match_kind is MatchKind.SIMILAR and not metadata.image_url:
                 overlap = observed_tokens & page_tokens
                 if not observed_tokens or not overlap:
+                    invalid_page_count += 1
                     continue
             verified.append(
                 RetailMatch(
@@ -488,12 +603,47 @@ class RetailerSearchService:
                     price=metadata.price,
                 )
             )
+        report["counts"]["validRetailerPages"] = valid_page_count
+        if invalid_page_count:
+            report["reasons"].append({
+                "stage": "retailer_validation",
+                "status": "rejected",
+                "code": "invalid_retailer_pages",
+                "message": f"{invalid_page_count} candidate page(s) failed retailer-page validation.",
+                "retryable": False,
+            })
+        if low_confidence_count:
+            report["reasons"].append({
+                "stage": "candidate_filtering",
+                "status": "rejected",
+                "code": "low_discovery_confidence",
+                "message": f"{low_confidence_count} candidate(s) had insufficient discovery confidence.",
+                "retryable": False,
+            })
         ranked = sorted(verified, key=lambda item: item.confidence, reverse=True)
-        return self._visually_verify(
+        report["counts"]["visualCandidates"] = sum(
+            bool(item.image_url) for item in ranked[: self.candidate_limit]
+        )
+        accepted = self._visually_verify(
             candidate,
             ranked[: self.candidate_limit],
             target_crops=target_crops,
         )
+        report["counts"]["possibleMatches"] = sum(
+            item.match_kind is MatchKind.POSSIBLE for item in accepted
+        )
+        report["counts"]["verifiedMatches"] = sum(
+            item.match_kind is not MatchKind.POSSIBLE for item in accepted
+        )
+        if verified and not accepted:
+            report["reasons"].append({
+                "stage": "visual_verification",
+                "status": "rejected",
+                "code": "no_visual_match",
+                "message": "No validated retailer candidate passed visual verification.",
+                "retryable": False,
+            })
+        return accepted
 
     def _visually_verify(
         self,
@@ -602,13 +752,25 @@ class RetailerSearchService:
                 and axes["shapeMatch"] == "match"
                 and match_count >= 3
             )
+            possible_supported = (
+                axes["categoryMatch"] == "match"
+                and axes["shapeMatch"] == "match"
+            )
+            combined_confidence = min(
+                0.99, 0.8 * visual_confidence + 0.2 * match.confidence
+            )
             if (
                 verdict == "reject"
-                or visual_confidence < 0.82
+                or visual_confidence < POSSIBLE_VISUAL_CONFIDENCE
+                or combined_confidence < POSSIBLE_VISUAL_CONFIDENCE
                 or hard_mismatch
-                or not similar_supported
+                or not possible_supported
             ):
                 continue
+            verified_supported = (
+                visual_confidence >= VERIFIED_VISUAL_CONFIDENCE
+                and similar_supported
+            )
             exact_supported = (
                 verdict == "exact"
                 and match.match_kind is MatchKind.EXACT
@@ -616,9 +778,17 @@ class RetailerSearchService:
                 and visual_confidence >= 0.92
                 and match_count == len(axes)
             )
-            match_kind = MatchKind.EXACT if exact_supported else MatchKind.SIMILAR
-            final_confidence = min(
-                0.99, 0.8 * visual_confidence + 0.2 * match.confidence
+            match_kind = (
+                MatchKind.EXACT
+                if exact_supported
+                else MatchKind.SIMILAR
+                if verified_supported
+                else MatchKind.POSSIBLE
+            )
+            final_confidence = (
+                min(VERIFIED_VISUAL_CONFIDENCE - 0.001, combined_confidence)
+                if match_kind is MatchKind.POSSIBLE
+                else combined_confidence
             )
             contradiction_note = (
                 f"; contradictions reviewed: {', '.join(str(item) for item in contradictions)}"
@@ -650,7 +820,9 @@ class RetailerSearchService:
             "searching_retailers",
             {"candidateId": candidate.id, "name": candidate.name},
         )
-        matches = self.search(candidate)
+        diagnostics: dict[str, Any] = {}
+        matches = self.search(candidate, diagnostics=diagnostics)
+        _emit(event_callback, "retailer_search_diagnostics", diagnostics)
         primary = matches[0] if matches else None
         match_kind = primary.match_kind if primary else MatchKind.POSSIBLE
         finding = ProductFinding(

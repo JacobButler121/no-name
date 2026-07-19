@@ -264,11 +264,13 @@ export default function Home() {
   const pastedYoutubeId = youtubeVideoId(url);
   const youtubeId = youtubeVideoId(sourceUrl);
   const mainProducts = products.filter((product) => product.matchKind !== "possible" && Boolean(product.productUrl));
+  const possibleProducts = products.filter((product) => product.matchKind === "possible" && Boolean(product.productUrl));
+  const linkedProducts = [...mainProducts, ...possibleProducts];
   const taggedProducts = products.filter((product) => product.appearances.length > 0);
   const groupedMoments = taggedProducts.flatMap((product) =>
     groupAppearances(product.appearances).map((group) => ({ product, group })),
   );
-  const activeProduct = taggedProducts.find((product) => product.id === activeId) ?? mainProducts[0] ?? taggedProducts[0];
+  const activeProduct = taggedProducts.find((product) => product.id === activeId) ?? linkedProducts[0] ?? taggedProducts[0];
   const progressIndex = eventOrder.indexOf(eventType);
   const progress = status === "complete" ? 100 : Math.max(6, ((Math.max(0, progressIndex) + 1) / eventOrder.length) * 100);
 
@@ -694,10 +696,10 @@ export default function Home() {
 
           <div className={`results-column ${mobileResults ? "mobile-open" : ""}`}>
             <div className="panel-heading">
-              <div><span className="step-number">02</span><div><strong>Findings</strong><small>{status === "complete" ? `${mainProducts.length} verified products` : eventCopy[eventType]}</small></div></div>
+              <div><span className="step-number">02</span><div><strong>Findings</strong><small>{status === "complete" ? `${mainProducts.length} verified · ${possibleProducts.length} possible` : eventCopy[eventType]}</small></div></div>
               {status === "complete" && <span className="complete-badge"><i />Complete</span>}
             </div>
-            {status !== "complete" && mainProducts.length === 0 ? (
+            {status !== "complete" && linkedProducts.length === 0 ? (
               <div className="processing" aria-live="polite">
                 <div className="scan-orbit"><span>{Math.round(progress)}%</span><i /><i /><i /></div>
                 <h2>{eventCopy[eventType]}</h2>
@@ -708,8 +710,9 @@ export default function Home() {
             ) : (
               <div className="findings-scroll">
                 <div className="results-summary"><div><strong>{mainProducts.length.toString().padStart(2, "0")}</strong><span>Verified shopping<br />matches</span></div><p><i />Exact match <b>{mainProducts.filter((product) => product.matchKind === "exact").length}</b></p></div>
-                {mainProducts.length === 0 && <div className="no-findings"><h2>No verified shopping matches</h2><p>Spotted detected objects, but none passed both retailer-page and visual verification.</p></div>}
+                {linkedProducts.length === 0 && <div className="no-findings"><h2>No shopping matches found</h2><p>Spotted detected objects, but no retailer candidate passed the minimum visual and page checks.</p></div>}
                 <div className="product-list">{mainProducts.map((product, index) => <ProductCard key={product.id} product={product} index={index} active={activeId === product.id} onSelect={() => setActiveId(product.id)} onTime={(appearance) => seek(product, appearance)} />)}</div>
+                {possibleProducts.length > 0 && <section className="possible-section" aria-label="Possible matches"><div className="possible-title"><span>Possible matches</span><small>Visually plausible · not verified as exact</small></div><div className="product-list">{possibleProducts.map((product, index) => <ProductCard key={product.id} product={product} index={mainProducts.length + index} active={activeId === product.id} onSelect={() => setActiveId(product.id)} onTime={(appearance) => seek(product, appearance)} />)}</div></section>}
               </div>
             )}
           </div>
@@ -717,7 +720,7 @@ export default function Home() {
         )}
       </div>
 
-      {workspaceVisible && <button className="mobile-toggle" onClick={() => setMobileResults((value) => !value)}>{mobileResults ? "Show video" : `Show ${mainProducts.length} matches`} <span>↗</span></button>}
+      {workspaceVisible && <button className="mobile-toggle" onClick={() => setMobileResults((value) => !value)}>{mobileResults ? "Show video" : `Show ${linkedProducts.length} matches`} <span>↗</span></button>}
       <footer><div className="logo footer-logo"><span>Spotted</span><i aria-hidden="true" /></div><span>Built for the OpenAI hackathon · 2026</span></footer>
     </main>
   );
@@ -743,7 +746,7 @@ function ProductCard({ product, index, active, onSelect, onTime }: { product: Pr
         <p>{product.brand || product.category}</p><h3>{product.name}</h3><small>{product.category}{product.model ? ` · ${product.model}` : ""}</small>
         <div className="timestamps"><span>Seen</span>{appearanceGroups.map((group) => <button key={group.first.startSec} title={group.count > 1 ? `${group.count} nearby sampled appearances grouped` : group.first.evidence} onClick={() => onTime(group.first)}>{appearanceGroupLabel(group)}</button>)}</div>
       </div>
-      <div className="product-shop">{product.price && <strong>{product.price}</strong>}<small>{product.retailerName ? `at ${product.retailerName}` : "Verified retailer"}</small>{product.productUrl && <a href={product.productUrl} target="_blank" rel="noopener noreferrer">View product <span>↗</span></a>}</div>
+      <div className="product-shop">{product.price && <strong>{product.price}</strong>}<small>{product.retailerName ? `at ${product.retailerName}` : product.matchKind === "possible" ? "Candidate retailer" : "Verified retailer"}</small>{product.productUrl && <a href={product.productUrl} target="_blank" rel="noopener noreferrer">View product <span>↗</span></a>}</div>
     </article>
   );
 }

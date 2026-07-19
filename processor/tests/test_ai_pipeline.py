@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import tempfile
 import unittest
+import urllib.error
 import urllib.parse
 from pathlib import Path
 from unittest.mock import patch
@@ -19,6 +22,7 @@ from processor.models import (
     ProductCandidate,
 )
 from processor.search import RetailerSearchService
+from processor.search.retailer import _cropped_frame_path
 from processor.search.lens import GoogleLensSearchClient, LensCandidate
 from processor.search.validation import ProductPageMetadata
 
@@ -205,6 +209,38 @@ class LensClientTests(unittest.TestCase):
         self.assertEqual(requests[0].get_header("Authorization"), "Bearer relay-secret")
         self.assertEqual(requests[2].get_header("Authorization"), "Bearer relay-secret")
 
+    def test_lens_network_failure_is_distinct_from_zero_results(self) -> None:
+        def failing_opener(*_args, **_kwargs):
+            raise urllib.error.URLError("secret upstream detail")
+
+        client = GoogleLensSearchClient(
+            api_key="serp-key",
+            public_base_url="https://spotted.example",
+            opener=failing_opener,
+        )
+        outcome = client.search_with_diagnostics(
+            "https://spotted.example/api/jobs/one/crops/lamp.jpg"
+        )
+
+        self.assertEqual(outcome.status, "error")
+        self.assertEqual(outcome.candidates, ())
+        self.assertEqual(outcome.diagnostics[0].code, "network_error")
+        self.assertNotIn("secret upstream detail", json.dumps(outcome.to_dict()))
+
+    def test_missing_relay_token_has_safe_configuration_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            crop = Path(directory) / "lamp.jpg"
+            crop.write_bytes(b"jpeg-crop")
+            client = GoogleLensSearchClient(
+                api_key="serp-key",
+                relay_url="https://spotted.example/api/lens-crops",
+                relay_token="",
+            )
+            outcome = client.search_crop_with_diagnostics(crop)
+
+        self.assertEqual(outcome.status, "disabled")
+        self.assertEqual(outcome.diagnostics[0].code, "missing_relay_token")
+
 
 class ModelContractTests(unittest.TestCase):
     def test_manifest_accepts_media_worker_camel_case_shape(self) -> None:
@@ -213,6 +249,10 @@ class ModelContractTests(unittest.TestCase):
                 "version": 1,
                 "durationSec": 20.5,
                 "searchFocus": "Find all the lamps",
+                "sourceUrl": "https://youtube.com/watch?v=demo",
+                "sourceTitle": "2026 Interior Design Trends with Shea McGee",
+                "sourceChannel": "Studio McGee",
+                "sourcePlatform": "youtube",
                 "captionSegments": [
                     {"startSec": 2.0, "endSec": 5.0, "text": "This is the reading lamp."}
                 ],
@@ -233,6 +273,9 @@ class ModelContractTests(unittest.TestCase):
         self.assertEqual([frame.timestamp_sec for frame in manifest.frames], [1.0, 4.0])
         self.assertEqual(manifest.duration_sec, 20.5)
         self.assertEqual(manifest.search_focus, "Find all the lamps")
+        self.assertEqual(manifest.source_title, "2026 Interior Design Trends with Shea McGee")
+        self.assertEqual(manifest.source_channel, "Studio McGee")
+        self.assertEqual(manifest.source_platform, "youtube")
         self.assertEqual(manifest.caption_segments[0].text, "This is the reading lamp.")
         self.assertEqual(manifest.frames[1].thumbnail_url, "/api/jobs/a/frames/frame-0002.jpg")
 
@@ -329,6 +372,80 @@ class DedupeTests(unittest.TestCase):
         red.material = "ceramic"
         self.assertEqual(len(deduplicate_candidates([pale, red])), 2)
 
+    def test_lighting_subtypes_and_silhouettes_do_not_merge(self) -> None:
+        table_lamp = candidate(
+            "batch-1-candidate-1",
+            name="white ceramic table lamp",
+            category="lamp",
+            brand=None,
+            model=None,
+            timestamp=10.0,
+        )
+        table_lamp.visual_description = "Spherical ceramic base with tapered cone shade"
+        pendant = candidate(
+            "batch-2-candidate-1",
+            name="white globe pendant lamp",
+            category="pendant lamp",
+            brand=None,
+            model=None,
+            timestamp=55.0,
+        )
+        pendant.visual_description = "Suspended glass globe on a cord"
+        self.assertEqual(len(deduplicate_candidates([table_lamp, pendant])), 2)
+
+    def test_contradictory_lamp_construction_does_not_merge(self) -> None:
+        angled = candidate(
+            "batch-1-candidate-1",
+            name="black desk lamp",
+            category="lamp",
+            brand=None,
+            model=None,
+            timestamp=10.0,
+        )
+        angled.visual_description = "Articulated angled arm and metal dome shade"
+        column = candidate(
+            "batch-2-candidate-1",
+            name="black desk lamp",
+            category="lamp",
+            brand=None,
+            model=None,
+            timestamp=55.0,
+        )
+        column.visual_description = "Straight column stem with a drum shade"
+        self.assertEqual(len(deduplicate_candidates([angled, column])), 2)
+
+    def test_spatially_distinct_same_scene_instances_do_not_merge(self) -> None:
+        left = candidate(
+            "left",
+            name="white table lamp",
+            category="lamp",
+            brand=None,
+            model=None,
+            timestamp=20.0,
+        )
+        right = candidate(
+            "right",
+            name="white table lamp",
+            category="lamp",
+            brand=None,
+            model=None,
+            timestamp=20.0,
+        )
+        left.visual_description = right.visual_description = "White ceramic lamp with tapered shade"
+        left.appearances[0] = Appearance(
+            start_sec=20.0,
+            evidence="Lamp on left nightstand",
+            bounding_box=BoundingBox(x=0.04, y=0.2, width=0.18, height=0.5),
+        )
+        right.appearances[0] = Appearance(
+            start_sec=20.0,
+            evidence="Lamp on right nightstand",
+            bounding_box=BoundingBox(x=0.78, y=0.2, width=0.18, height=0.5),
+        )
+        result = deduplicate_candidates([left, right])
+        self.assertEqual(len(result), 2)
+        self.assertEqual(len({item.id for item in result}), 2)
+
     def test_precision_selection_rejects_one_frame_generic_guesses(self) -> None:
         one_frame = candidate(
             "one-frame",
@@ -415,6 +532,10 @@ class LivePipelineTests(unittest.TestCase):
             image.write_bytes(b"not-decoded-locally")
             manifest = {
                 "searchFocus": "Find all the headphones",
+                "sourceUrl": "https://youtube.com/watch?v=demo",
+                "sourceTitle": "Headphone studio tour",
+                "sourceChannel": "Example Channel",
+                "sourcePlatform": "youtube",
                 "captionSegments": [
                     {"startSec": 1.0, "endSec": 3.0, "text": "These headphones are black."}
                 ],
@@ -434,6 +555,10 @@ class LivePipelineTests(unittest.TestCase):
                 manifest, event_callback=lambda event, payload: events.append(event)
             )
         self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].source_title, "Headphone studio tour")
+        self.assertEqual(results[0].source_channel, "Example Channel")
+        self.assertEqual(results[0].source_platform, "youtube")
+        self.assertEqual(results[0].search_focus, "Find all the headphones")
         self.assertEqual(results[0].appearances[0].start_sec, 7.0)
         self.assertEqual(
             [item.start_sec for item in results[0].appearances],
@@ -487,6 +612,53 @@ class LivePipelineTests(unittest.TestCase):
 
 
 class RetailSearchTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg required")
+    def test_small_object_crop_is_padded_and_upscaled_to_512_pixels_wide(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            frame = Path(directory) / "frame.jpg"
+            subprocess.run(
+                [
+                    shutil.which("ffmpeg") or "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=white:size=320x180",
+                    "-frames:v",
+                    "1",
+                    str(frame),
+                ],
+                check=True,
+                timeout=20,
+            )
+            crop = _cropped_frame_path(
+                str(frame), BoundingBox(x=0.4, y=0.2, width=0.2, height=0.4)
+            )
+            self.assertIsNotNone(crop)
+            probe = subprocess.run(
+                [
+                    shutil.which("ffprobe") or "ffprobe",
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=width,height",
+                    "-of",
+                    "json",
+                    str(crop),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            dimensions = json.loads(probe.stdout)["streams"][0]
+            self.assertGreaterEqual(dimensions["width"], 512)
+            self.assertGreater(dimensions["height"], dimensions["width"])
+
     def test_google_lens_candidates_seed_the_openai_search_once_per_product(self) -> None:
         fake_openai = FakeClient([{"matches": []}])
         fake_lens = FakeLensClient()
@@ -502,6 +674,11 @@ class RetailSearchTests(unittest.TestCase):
             )
             detected.color = "green"
             detected.material = "ceramic"
+            detected.source_url = "https://youtube.com/watch?v=demo"
+            detected.source_title = "2026 Interior Design Trends with Shea McGee"
+            detected.source_channel = "Studio McGee"
+            detected.source_platform = "youtube"
+            detected.search_focus = "lamps"
             detected.appearances[0] = Appearance(
                 start_sec=7.0,
                 evidence="Green ceramic lamp with a white drum shade",
@@ -522,6 +699,32 @@ class RetailSearchTests(unittest.TestCase):
         self.assertIn("Google Lens candidates", search_prompt)
         self.assertIn("Green ceramic vessel table lamp", search_prompt)
         self.assertIn("https://lighting.example/green-vessel-lamp", search_prompt)
+        self.assertIn("2026 Interior Design Trends with Shea McGee", search_prompt)
+        self.assertIn("Studio McGee", search_prompt)
+        self.assertIn("Studio McGee", fake_lens.calls[0][1] or "")
+
+    def test_retrieval_stage_counts_and_reasons_are_emitted(self) -> None:
+        fake_openai = FakeClient([{"matches": []}])
+        events: list[tuple[str, dict]] = []
+        service = RetailerSearchService(
+            client=fake_openai,
+            lens_client=GoogleLensSearchClient(api_key=""),
+            metadata_fetcher=lambda *args, **kwargs: None,
+        )
+        service.enrich(
+            candidate("lamp", name="table lamp", category="lamp", brand=None, model=None),
+            event_callback=lambda event, payload: events.append((event, payload)),
+        )
+
+        diagnostic = next(
+            payload for event, payload in events
+            if event == "retailer_search_diagnostics"
+        )
+        self.assertEqual(diagnostic["candidateId"], "lamp")
+        self.assertEqual(diagnostic["counts"]["lensCandidates"], 0)
+        self.assertEqual(diagnostic["counts"]["webCandidates"], 0)
+        self.assertEqual(diagnostic["counts"]["verifiedMatches"], 0)
+        self.assertIn("no_target_crops", {item["code"] for item in diagnostic["reasons"]})
 
     def test_exact_match_requires_brand_model_and_verified_page(self) -> None:
         fake = FakeClient(
@@ -668,6 +871,71 @@ class RetailSearchTests(unittest.TestCase):
             any(item.get("type") == "input_image" for item in search_content)
         )
         self.assertEqual(fake.payloads[0]["model"], "gpt-5.6-terra")
+
+    def test_plausible_visual_candidate_is_linked_as_possible_not_verified(self) -> None:
+        fake = FakeClient(
+            [
+                {
+                    "matches": [
+                        {
+                            "productName": "White Ceramic Round Table Lamp",
+                            "retailerName": "Lighting Store",
+                            "productUrl": "https://lighting.example/white-round-lamp",
+                            "matchKind": "similar",
+                            "confidence": 0.78,
+                            "evidence": "Round white base and tapered shade are plausible",
+                        }
+                    ]
+                },
+                {
+                    "comparisons": [
+                        {
+                            "index": 0,
+                            "verdict": "similar",
+                            "confidence": 0.74,
+                            "categoryMatch": "match",
+                            "shapeMatch": "match",
+                            "colorMatch": "match",
+                            "materialMatch": "unknown",
+                            "constructionMatch": "unknown",
+                            "identityEvidence": False,
+                            "contradictions": [],
+                            "evidence": "Silhouette and color agree but details are soft",
+                        }
+                    ]
+                },
+            ]
+        )
+        metadata = ProductPageMetadata(
+            url="https://lighting.example/white-round-lamp",
+            title="White Ceramic Round Table Lamp",
+            image_url="https://lighting.example/white-round-lamp.jpg",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            frame = Path(directory) / "frame.jpg"
+            frame.write_bytes(b"frame")
+            detected = candidate(
+                "lamp",
+                name="white ceramic table lamp",
+                category="lamp",
+                brand=None,
+                model=None,
+            )
+            detected.appearances[0] = Appearance(
+                start_sec=1.0,
+                evidence="White round lamp",
+                bounding_box=BoundingBox(x=0.2, y=0.1, width=0.35, height=0.65),
+                source_path=str(frame),
+            )
+            result = RetailerSearchService(
+                client=fake,
+                metadata_fetcher=lambda *args, **kwargs: metadata,
+            ).enrich(detected)
+
+        self.assertEqual(result.match_kind, MatchKind.POSSIBLE)
+        self.assertEqual(result.product_url, metadata.url)
+        self.assertAlmostEqual(result.match_confidence, 0.748)
+        self.assertLess(result.match_confidence, 0.82)
 
     def test_visual_contradiction_rejects_high_confidence_search_result(self) -> None:
         fake = FakeClient(
