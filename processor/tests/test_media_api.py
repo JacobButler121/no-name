@@ -13,7 +13,7 @@ try:
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from processor.api.routes import _read_vtt_segments, create_router
+    from processor.api.routes import _read_source_metadata, _read_vtt_segments, create_router
     from processor.config import Settings
     from processor.storage import JobStore
 
@@ -78,7 +78,7 @@ class MediaApiTests(unittest.TestCase):
             snapshot = self._wait_for_terminal(job_id)
 
         self.assertEqual(snapshot["status"], "completed")
-        self.assertEqual(len(snapshot["frames"]), 1)
+        self.assertGreaterEqual(len(snapshot["frames"]), 1)
         manifest = json.loads(
             (self.store.get(job_id).directory / "frames" / "manifest.json").read_text()
         )
@@ -119,6 +119,17 @@ class MediaApiTests(unittest.TestCase):
         self.assertEqual(
             _read_vtt_segments([captions]),
             [{"startSec": 2.0, "endSec": 5.0, "text": "This is the reading lamp."}],
+        )
+
+    def test_source_metadata_reads_ytdlp_title_and_channel(self) -> None:
+        metadata = Path(self.temporary.name) / "source.info.json"
+        metadata.write_text(
+            json.dumps({"title": "Design Trends", "channel": "Studio McGee"}),
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            _read_source_metadata(Path(self.temporary.name)),
+            {"title": "Design Trends", "channel": "Studio McGee"},
         )
 
     def _wait_for_terminal(self, job_id: str) -> dict:

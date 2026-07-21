@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
+import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -120,6 +122,10 @@ The same physical item across frames must use the same short instanceKey. Differ
 physical instances—even visually similar ones—must use different instanceKeys. Return
 every frameIndex where it appears in this batch. frameIndex must be copied from the
 label immediately before the corresponding image; never calculate or invent a timestamp.
+When a scene contains a matching pair or set (for example two bedside lamps), return one
+candidate per physical object, with a separate instanceKey and tight bounding box for
+each. Never use plural evidence such as "both lamps" for a candidate whose box encloses
+only one lamp. Symmetry and matching appearance do not make two objects one instance.
 Evidence must briefly describe what is actually visible or spoken. Bounding boxes must
 tightly enclose the named object rather than a person, wall, or whole room. Systematically
 sweep every supplied frame and do not omit a clearly visible background object that
@@ -153,8 +159,9 @@ class ProductAnalysisPipeline:
         batch_size: int = 10,
         detail: str = "high",
         min_confidence: float = 0.7,
-        focused_limit: int = 5,
-        broad_limit: int = 8,
+        focused_limit: int | None = None,
+        broad_limit: int | None = None,
+        analysis_workers: int | None = None,
     ) -> None:
         if not 1 <= batch_size <= 20:
             raise ValueError("batch_size must be between 1 and 20")
@@ -164,8 +171,15 @@ class ProductAnalysisPipeline:
         self.batch_size = batch_size
         self.detail = detail
         self.min_confidence = min_confidence
-        self.focused_limit = focused_limit
-        self.broad_limit = broad_limit
+        configured_limit = max(1, int(os.getenv("SPOTTED_MAX_PRODUCTS", "64")))
+        self.focused_limit = focused_limit or configured_limit
+        self.broad_limit = broad_limit or configured_limit
+        self.analysis_workers = max(
+            1,
+            analysis_workers
+            if analysis_workers is not None
+            else int(os.getenv("SPOTTED_ANALYSIS_WORKERS", "4")),
+        )
 
     def analyze(
         self,
@@ -175,9 +189,18 @@ class ProductAnalysisPipeline:
     ) -> list[ProductCandidate]:
         parsed = manifest if isinstance(manifest, FrameManifest) else FrameManifest.from_dict(manifest)
         candidates: list[ProductCandidate] = []
-        total_batches = (len(parsed.frames) + self.batch_size - 1) // self.batch_size
-        for batch_index, offset in enumerate(range(0, len(parsed.frames), self.batch_size), start=1):
-            frames = parsed.frames[offset : offset + self.batch_size]
+        batches = [
+            (batch_index, parsed.frames[offset : offset + self.batch_size])
+            for batch_index, offset in enumerate(
+                range(0, len(parsed.frames), self.batch_size), start=1
+            )
+        ]
+        total_batches = len(batches)
+
+        def analyze_batch(
+            task: tuple[int, Sequence[FrameSample]],
+        ) -> list[ProductCandidate]:
+            batch_index, frames = task
             _emit(
                 event_callback,
                 "analyzing_frame",
@@ -195,7 +218,6 @@ class ProductAnalysisPipeline:
                 parsed.search_focus,
                 batch_index,
             )
-            candidates.extend(batch_candidates)
             for item in batch_candidates:
                 _emit(
                     event_callback,
@@ -208,7 +230,28 @@ class ProductAnalysisPipeline:
                         "appearances": [appearance.to_dict() for appearance in item.appearances],
                     },
                 )
+            return batch_candidates
+
+        if self.analysis_workers == 1 or len(batches) == 1:
+            batch_results = map(analyze_batch, batches)
+            for batch_candidates in batch_results:
+                candidates.extend(batch_candidates)
+        else:
+            with ThreadPoolExecutor(
+                max_workers=min(self.analysis_workers, len(batches)),
+                thread_name_prefix="spotted-frame-analysis",
+            ) as executor:
+                # executor.map preserves batch order while executing requests
+                # concurrently, keeping stable IDs and deterministic deduping.
+                for batch_candidates in executor.map(analyze_batch, batches):
+                    candidates.extend(batch_candidates)
         merged = deduplicate_candidates(candidates)
+        for candidate in merged:
+            candidate.source_url = parsed.source_url
+            candidate.source_title = parsed.source_title
+            candidate.source_channel = parsed.source_channel
+            candidate.source_platform = parsed.source_platform
+            candidate.search_focus = parsed.search_focus
         selected = _select_candidates(
             merged,
             limit=self.focused_limit if parsed.search_focus else self.broad_limit,

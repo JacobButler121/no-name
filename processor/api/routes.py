@@ -95,6 +95,8 @@ def create_router(store: JobStore, settings: Settings) -> APIRouter:
             _add_manifest_context(
                 manifest_path,
                 source_url=store.get(job_id).source_url,
+                source_platform=store.get(job_id).platform,
+                source_metadata=_read_source_metadata(job.directory),
                 subtitle_paths=subtitle_paths,
                 search_focus=focus,
             )
@@ -302,18 +304,41 @@ def _add_manifest_context(
     manifest_path: Path,
     *,
     source_url: str | None,
+    source_platform: str | None,
+    source_metadata: dict[str, object] | None,
     subtitle_paths: list[Path],
     search_focus: str | None,
 ) -> None:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if source_url:
         manifest["sourceUrl"] = source_url
+    if source_platform:
+        manifest["sourcePlatform"] = source_platform
+    if source_metadata:
+        title = source_metadata.get("title")
+        channel = source_metadata.get("channel") or source_metadata.get("uploader")
+        if isinstance(title, str) and title.strip():
+            manifest["sourceTitle"] = title.strip()
+        if isinstance(channel, str) and channel.strip():
+            manifest["sourceChannel"] = channel.strip()
     if search_focus:
         manifest["searchFocus"] = search_focus
     caption_segments = _read_vtt_segments(subtitle_paths)
     if caption_segments:
         manifest["captionSegments"] = caption_segments
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+
+def _read_source_metadata(directory: Path) -> dict[str, object] | None:
+    """Read the small subset of yt-dlp provenance needed by product search."""
+    for path in sorted(directory.glob("source*.info.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return None
 
 
 def _clean_focus(value: str | None) -> str | None:

@@ -147,6 +147,9 @@ class FrameManifest:
     transcript: str | None = None
     caption_segments: tuple[CaptionSegment, ...] = ()
     source_url: str | None = None
+    source_title: str | None = None
+    source_channel: str | None = None
+    source_platform: str | None = None
     search_focus: str | None = None
     duration_sec: float | None = None
 
@@ -161,6 +164,9 @@ class FrameManifest:
             transcript = _value(data, "transcript", "captions")
             raw_segments = _value(data, "captionSegments", "caption_segments", default=[])
             source_url = _value(data, "sourceUrl", "source_url", "url")
+            source_title = _value(data, "sourceTitle", "source_title", "title")
+            source_channel = _value(data, "sourceChannel", "source_channel", "channel")
+            source_platform = _value(data, "sourcePlatform", "source_platform", "platform")
             search_focus = _value(data, "searchFocus", "search_focus", "focus")
             duration = _value(data, "durationSec", "duration_sec", "duration")
         else:
@@ -168,6 +174,9 @@ class FrameManifest:
             transcript = None
             raw_segments = []
             source_url = None
+            source_title = None
+            source_channel = None
+            source_platform = None
             search_focus = None
             duration = None
         frames = tuple(sorted((FrameSample.from_dict(item) for item in raw_frames), key=lambda item: item.timestamp_sec))
@@ -176,6 +185,9 @@ class FrameManifest:
             transcript=str(transcript) if transcript else None,
             caption_segments=tuple(CaptionSegment.from_dict(item) for item in raw_segments),
             source_url=str(source_url) if source_url else None,
+            source_title=str(source_title).strip() if source_title else None,
+            source_channel=str(source_channel).strip() if source_channel else None,
+            source_platform=str(source_platform).strip() if source_platform else None,
             search_focus=str(search_focus).strip() if search_focus else None,
             duration_sec=float(duration) if duration is not None else None,
         )
@@ -235,6 +247,13 @@ class ProductCandidate:
     visual_description: str | None = None
     visible_text: list[str] = field(default_factory=list)
     instance_key: str | None = None
+    # Processor-only provenance used to make shopping retrieval source-aware.
+    # These fields are intentionally absent from the browser finding contract.
+    source_url: str | None = None
+    source_title: str | None = None
+    source_channel: str | None = None
+    source_platform: str | None = None
+    search_focus: str | None = None
 
     def __post_init__(self) -> None:
         self.confidence = _bounded_float(self.confidence, 0.0, 1.0, "confidence")
@@ -261,6 +280,11 @@ class ProductCandidate:
             ),
             visible_text=[str(item).strip() for item in _value(data, "visibleText", "visible_text", default=[]) if str(item).strip()],
             instance_key=_clean_optional(_value(data, "instanceKey", "instance_key")),
+            source_url=_clean_optional(_value(data, "sourceUrl", "source_url")),
+            source_title=_clean_optional(_value(data, "sourceTitle", "source_title")),
+            source_channel=_clean_optional(_value(data, "sourceChannel", "source_channel")),
+            source_platform=_clean_optional(_value(data, "sourcePlatform", "source_platform")),
+            search_focus=_clean_optional(_value(data, "searchFocus", "search_focus")),
         )
 
 

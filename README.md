@@ -1,6 +1,6 @@
 # Spotted
 
-Spotted turns public YouTube, TikTok, and Instagram videos into timestamped shopping findings. It retrieves a video, samples every five seconds, uses OpenAI vision to identify and track products, preserves timestamps from near-identical scenes without analyzing them twice, and performs image-informed web search plus multi-image verification before showing a shopping link.
+Spotted turns public YouTube, TikTok, and Instagram videos into timestamped shopping findings. It retrieves a video, samples every 1 second, uses OpenAI vision to identify and track products, preserves timestamps from near-identical scenes without analyzing them twice, and performs image-informed web search plus multi-image verification before showing a shopping link.
 
 Spotted never substitutes canned product results. If a social platform blocks retrieval, the interface offers a real video-upload fallback.
 

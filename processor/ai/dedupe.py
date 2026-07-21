@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from difflib import SequenceMatcher
 from typing import Iterable
@@ -26,6 +27,29 @@ _CATEGORY_FAMILIES = {
 }
 _GENERIC_MATERIALS = {"material", "mixed", "metal", "wood", "plastic"}
 _BATCH_PATTERN = re.compile(r"batch-(\d+)-candidate-")
+_LIGHTING_SUBTYPES = {
+    "table": {"table", "desk", "bedside", "nightstand"},
+    "floor": {"floor", "standing", "torchiere"},
+    "pendant": {"pendant", "hanging", "suspension"},
+    "wall": {"wall", "sconce"},
+    "chandelier": {"chandelier"},
+}
+_LIGHTING_VISUAL_AXES = (
+    {
+        "drum": {"drum", "cylindrical"},
+        "cone": {"cone", "conical", "tapered"},
+        "globe": {"globe", "orb", "spherical"},
+        "dome": {"dome", "domed"},
+        "bell": {"bell"},
+        "rectilinear": {"square", "rectangular", "boxy"},
+    },
+    {
+        "tripod": {"tripod", "three-legged"},
+        "angled-arm": {"angled", "articulated", "swing-arm", "cantilever"},
+        "straight-stem": {"stem", "column", "columnar"},
+        "suspended": {"chain", "cord-hung", "suspended"},
+    },
+)
 
 
 def _normalized(value: str | None) -> str:
@@ -50,6 +74,70 @@ def _category_family(value: str | None) -> str:
 def _batch_id(candidate: ProductCandidate) -> str | None:
     match = _BATCH_PATTERN.search(candidate.id)
     return match.group(1) if match else None
+
+
+def _lighting_subtype(candidate: ProductCandidate) -> str | None:
+    if _category_family(candidate.category) != "lighting":
+        return None
+    tokens = _tokens(candidate.category, candidate.name, candidate.visual_description)
+    matches = [
+        subtype
+        for subtype, aliases in _LIGHTING_SUBTYPES.items()
+        if tokens & aliases
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _visual_axis_values(candidate: ProductCandidate) -> tuple[set[str], ...]:
+    """Extract only strong, lighting-specific silhouette/construction signals."""
+    if _category_family(candidate.category) != "lighting":
+        return ()
+    tokens = _tokens(candidate.name, candidate.visual_description)
+    return tuple(
+        {label for label, aliases in axis.items() if tokens & aliases}
+        for axis in _LIGHTING_VISUAL_AXES
+    )
+
+
+def _spatially_distinct(left: ProductCandidate, right: ProductCandidate) -> bool:
+    """Return true for separate detections in the same sampled scene.
+
+    Position is not compared across distant timestamps because a camera move can
+    relocate the same object. Near-simultaneous, non-overlapping boxes are strong
+    evidence that these are separate physical instances.
+    """
+    for left_appearance in left.appearances:
+        left_box = left_appearance.bounding_box
+        if left_box is None:
+            continue
+        for right_appearance in right.appearances:
+            right_box = right_appearance.bounding_box
+            if right_box is None or abs(left_appearance.start_sec - right_appearance.start_sec) > 0.75:
+                continue
+            overlap_width = max(
+                0.0,
+                min(left_box.x + left_box.width, right_box.x + right_box.width)
+                - max(left_box.x, right_box.x),
+            )
+            overlap_height = max(
+                0.0,
+                min(left_box.y + left_box.height, right_box.y + right_box.height)
+                - max(left_box.y, right_box.y),
+            )
+            intersection = overlap_width * overlap_height
+            union = (
+                left_box.width * left_box.height
+                + right_box.width * right_box.height
+                - intersection
+            )
+            iou = intersection / union if union else 0.0
+            center_distance = math.hypot(
+                left_box.x + left_box.width / 2 - right_box.x - right_box.width / 2,
+                left_box.y + left_box.height / 2 - right_box.y - right_box.height / 2,
+            )
+            if iou < 0.05 and center_distance > 0.2:
+                return True
+    return False
 
 
 def _attribute_tokens(value: str | None) -> set[str]:
@@ -81,6 +169,16 @@ def _similarity(left: ProductCandidate, right: ProductCandidate) -> float:
         left.material, right.material, material=True
     ):
         return 0.0
+    left_subtype, right_subtype = _lighting_subtype(left), _lighting_subtype(right)
+    if left_subtype and right_subtype and left_subtype != right_subtype:
+        return 0.0
+    for left_values, right_values in zip(
+        _visual_axis_values(left), _visual_axis_values(right), strict=True
+    ):
+        if left_values and right_values and left_values.isdisjoint(right_values):
+            return 0.0
+    if _spatially_distinct(left, right):
+        return 0.0
     left_brand, right_brand = _normalized(left.brand), _normalized(right.brand)
     left_model, right_model = _normalized(left.model), _normalized(right.model)
     if left_brand and right_brand and left_brand != right_brand:
@@ -94,13 +192,17 @@ def _similarity(left: ProductCandidate, right: ProductCandidate) -> float:
     if left_text and right_text and left_text & right_text:
         return 0.98
     if left.instance_key and right.instance_key:
-        if _normalized(left.instance_key) == _normalized(right.instance_key):
-            return 1.0
-        # Instance keys are authoritative only inside one model request. The
-        # model cannot coordinate key names across independently analyzed batches.
         left_batch, right_batch = _batch_id(left), _batch_id(right)
-        if not left_batch or not right_batch or left_batch == right_batch:
-            return 0.0
+        same_request = not left_batch or not right_batch or left_batch == right_batch
+        if same_request:
+            return (
+                1.0
+                if _normalized(left.instance_key) == _normalized(right.instance_key)
+                else 0.0
+            )
+        # Instance keys are local to one model request. Across batches the model
+        # commonly reuses generic keys such as ``table-lamp`` for unrelated
+        # objects, so cross-batch merging must be decided from visual evidence.
     left_tokens = _tokens(
         left.name, left.brand, left.model, left.color, left.material, left.visual_description
     )
@@ -166,6 +268,11 @@ def _merge_into(target: ProductCandidate, source: ProductCandidate) -> None:
     target.material = target.material or source.material
     target.visual_description = target.visual_description or source.visual_description
     target.instance_key = target.instance_key or source.instance_key
+    target.source_url = target.source_url or source.source_url
+    target.source_title = target.source_title or source.source_title
+    target.source_channel = target.source_channel or source.source_channel
+    target.source_platform = target.source_platform or source.source_platform
+    target.search_focus = target.search_focus or source.search_focus
     target.visible_text = sorted(set(target.visible_text + source.visible_text), key=str.casefold)
     target.appearances = _merge_appearances([*target.appearances, *source.appearances])
 
@@ -191,6 +298,15 @@ def deduplicate_candidates(
             groups.append(candidate)
         else:
             _merge_into(best, candidate)
+    assigned_ids: set[str] = set()
     for item in groups:
-        item.id = _stable_id(item)
+        stable_id = _stable_id(item)
+        if stable_id in assigned_ids:
+            suffix_seed = "|".join(
+                f"{appearance.start_sec:.3f}:{appearance.evidence}"
+                for appearance in item.appearances
+            )
+            stable_id = f"{stable_id}-{hashlib.sha1(suffix_seed.encode('utf-8')).hexdigest()[:6]}"
+        item.id = stable_id
+        assigned_ids.add(stable_id)
     return groups

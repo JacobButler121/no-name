@@ -1,12 +1,19 @@
 """Retail product discovery backed by visual retrieval and OpenAI verification."""
 
-from .lens import GoogleLensSearchClient, LensCandidate
+from .lens import (
+    GoogleLensSearchClient,
+    LensCandidate,
+    LensDiagnostic,
+    LensSearchOutcome,
+)
 from .retailer import RetailerSearchService, enrich_candidates
 from .validation import ProductPageMetadata, validate_product_url
 
 __all__ = [
     "GoogleLensSearchClient",
     "LensCandidate",
+    "LensDiagnostic",
+    "LensSearchOutcome",
     "ProductPageMetadata",
     "RetailerSearchService",
     "enrich_candidates",

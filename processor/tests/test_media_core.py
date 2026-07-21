@@ -44,6 +44,33 @@ class JobStoreTests(unittest.TestCase):
             self.assertEqual(store.cleanup_expired(), [job.id])
             self.assertFalse(job.directory.exists())
 
+    def test_retrieval_diagnostics_are_persisted_in_job_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = JobStore(Path(temporary))
+            job = store.create()
+            store.emit(
+                job.id,
+                "retailer_search_diagnostics",
+                candidateId="lamp-one",
+                counts={"lensCandidates": 0, "verifiedMatches": 0},
+                reasons=[{
+                    "stage": "relay_upload",
+                    "status": "error",
+                    "code": "relay_network_error",
+                    "message": "The crop could not be uploaded to the public relay.",
+                    "retryable": True,
+                }],
+            )
+
+            state = json.loads((job.directory / "job.json").read_text())
+            self.assertEqual(
+                state["retrievalDiagnostics"][0]["candidateId"], "lamp-one"
+            )
+            self.assertEqual(
+                state["retrievalDiagnostics"][0]["reasons"][0]["code"],
+                "relay_network_error",
+            )
+
 
 class RetrieverTests(unittest.TestCase):
     def test_caption_failure_does_not_discard_downloaded_video(self) -> None:
@@ -70,6 +97,7 @@ class RetrieverTests(unittest.TestCase):
             self.assertEqual(run.call_count, 2)
             self.assertIn("--js-runtimes", run.call_args_list[0].args[0])
             self.assertIn("--socket-timeout", run.call_args_list[0].args[0])
+            self.assertIn("--write-info-json", run.call_args_list[0].args[0])
             self.assertEqual(run.call_args_list[0].kwargs["timeout"], None)
             self.assertEqual(run.call_args_list[1].kwargs["timeout"], 90)
 
@@ -106,6 +134,7 @@ class MediaToolTests(unittest.TestCase):
             extractor = FrameExtractor(
                 shutil.which("ffmpeg") or "ffmpeg",
                 shutil.which("ffprobe") or "ffprobe",
+                similarity_threshold=1.1,
             )
             frames, manifest_path = extractor.extract(
                 video,
@@ -113,13 +142,17 @@ class MediaToolTests(unittest.TestCase):
                 job_id="test-job",
                 metadata=metadata,
             )
-            self.assertEqual([frame["timestampSec"] for frame in frames], [0.0, 5.0, 10.0])
+            self.assertEqual(
+                [frame["timestampSec"] for frame in frames],
+                [float(second) for second in range(11)],
+            )
             self.assertTrue(all(Path(frame["path"]).exists() for frame in frames))
             self.assertEqual(frames[0]["timestampSec"], 0.0)
             self.assertEqual(frames[0]["thumbnailUrl"], "/api/jobs/test-job/frames/frame-0001.jpg")
             manifest = json.loads(manifest_path.read_text())
             self.assertEqual(manifest["version"], 1)
-            self.assertEqual(manifest["intervalSec"], 5.0)
+            self.assertEqual(manifest["intervalSec"], 1.0)
+            self.assertEqual(manifest["sampledFrameCount"], 11)
             self.assertEqual(manifest["frames"], frames)
 
     def test_visually_identical_samples_are_removed(self) -> None:
@@ -153,11 +186,56 @@ class MediaToolTests(unittest.TestCase):
             frames, manifest_path = extractor.extract(
                 video, root, job_id="static-job", metadata=metadata
             )
-            self.assertEqual([frame["timestampSec"] for frame in frames], [0.0])
-            self.assertEqual(frames[0]["similarTimestamps"], [5.0, 10.0])
+            self.assertEqual(
+                [frame["timestampSec"] for frame in frames],
+                [0.0, 4.0, 8.0],
+            )
+            self.assertEqual(
+                frames[0]["similarTimestamps"],
+                [float(second) for second in range(1, 4)],
+            )
+            self.assertEqual(
+                frames[1]["similarTimestamps"],
+                [float(second) for second in range(5, 8)],
+            )
+            self.assertEqual(
+                frames[2]["similarTimestamps"],
+                [9.0, 10.0],
+            )
             manifest = json.loads(manifest_path.read_text())
-            self.assertEqual(manifest["sampledFrameCount"], 3)
-            self.assertEqual(manifest["skippedSimilarFrames"], 2)
+            self.assertEqual(manifest["sampledFrameCount"], 11)
+            self.assertEqual(manifest["skippedSimilarFrames"], 8)
+
+    def test_later_similar_scene_is_not_deduplicated_globally(self) -> None:
+        paths = [
+            Path("/tmp/sample-00000000.jpg"),
+            Path("/tmp/sample-00000001.jpg"),
+            Path("/tmp/sample-00000002.jpg"),
+            Path("/tmp/sample-00000003.jpg"),
+        ]
+        extractor = FrameExtractor(similarity_threshold=0.92)
+        # A, A, B, A: only the consecutive A frame may collapse. The final A
+        # returns after another scene and therefore needs a new bounding box.
+        with patch.object(
+            extractor,
+            "_perceptual_hashes",
+            return_value=[0b0000, 0b0000, (1 << 256) - 1, 0b0000],
+        ):
+            retained, duplicates = extractor._cluster_similar_frames(paths)
+
+        self.assertEqual(retained, [paths[0], paths[2], paths[3]])
+        self.assertEqual(duplicates, {paths[1]: paths[0]})
+
+    def test_timestamp_uses_frame_pts_filename(self) -> None:
+        sample = Path("/tmp/sample-00000007.jpg")
+        self.assertEqual(
+            FrameExtractor._timestamp_for_sample(sample, 99, 1.0, 20.0),
+            7.0,
+        )
+        self.assertEqual(
+            FrameExtractor._timestamp_for_sample(sample, 99, 0.5, 20.0),
+            3.5,
+        )
 
 
 if __name__ == "__main__":

@@ -1,11 +1,11 @@
 "use client";
 
 import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
-import { flushSync } from "react-dom";
 
 type YouTubePlayer = {
   destroy: () => void;
   getCurrentTime: () => number;
+  mute: () => void;
   playVideo: () => void;
   seekTo: (seconds: number, allowSeekAhead: boolean) => void;
 };
@@ -168,7 +168,7 @@ type AppearanceGroup = {
 
 function groupAppearances(
   appearances: Appearance[],
-  maximumGapSec = 30,
+  maximumGapSec = 2.25,
 ): AppearanceGroup[] {
   const ordered = [...appearances].sort((left, right) => left.startSec - right.startSec);
   const groups: AppearanceGroup[] = [];
@@ -184,6 +184,12 @@ function groupAppearances(
   }
   return groups;
 }
+
+// One-second frame sampling means the closest observation should be no more
+// than about half a second from playback. A small allowance keeps overlays
+// stable across YouTube's 500ms player updates without carrying a tag into a
+// visibly different moment.
+const APPEARANCE_MATCH_WINDOW_SEC = 0.75;
 
 function appearanceGroupLabel(group: AppearanceGroup) {
   const start = formatTime(group.first.startSec);
@@ -219,21 +225,12 @@ async function responseJson(response: Response): Promise<JobResponse> {
   }
 }
 
-type ViewTransitionDocument = Document & {
-  startViewTransition?: (update: () => void | Promise<void>) => { finished: Promise<void> };
-};
-
 function withSurfaceTransition(update: () => void): Promise<void> {
-  const transitionDocument = document as ViewTransitionDocument;
+  update();
   const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  if (!transitionDocument.startViewTransition || reduceMotion) {
-    update();
-    return Promise.resolve();
-  }
-  const transition = transitionDocument.startViewTransition(() => {
-    flushSync(update);
-  });
-  return transition.finished.catch(() => undefined);
+  return reduceMotion
+    ? Promise.resolve()
+    : new Promise((resolve) => window.setTimeout(resolve, 480));
 }
 
 export default function Home() {
@@ -251,8 +248,8 @@ export default function Home() {
   const [currentTime, setCurrentTime] = useState(0);
   const [error, setError] = useState("");
   const [mobileResults, setMobileResults] = useState(false);
+  const [showAllMoments, setShowAllMoments] = useState(false);
   const [videoReady, setVideoReady] = useState(false);
-  const [surfaceSettling, setSurfaceSettling] = useState(false);
   const [mediaAvailable, setMediaAvailable] = useState(false);
   const [videoDimensions, setVideoDimensions] = useState({ width: 16, height: 9 });
   const [videoRect, setVideoRect] = useState({ left: 0, top: 0, width: 0, height: 0 });
@@ -268,12 +265,15 @@ export default function Home() {
   const pastedYoutubeId = youtubeVideoId(url);
   const youtubeId = youtubeVideoId(sourceUrl);
   const mainProducts = products.filter((product) => product.matchKind !== "possible" && Boolean(product.productUrl));
-  const unmatchedProducts = products.filter((product) => !product.productUrl);
+  const possibleProducts = products.filter((product) => product.matchKind === "possible" && Boolean(product.productUrl));
+  const linkedProducts = [...mainProducts, ...possibleProducts];
+  const detectedOnlyProducts = products.filter((product) => !product.productUrl);
   const taggedProducts = products.filter((product) => product.appearances.length > 0);
   const groupedMoments = taggedProducts.flatMap((product) =>
     groupAppearances(product.appearances).map((group) => ({ product, group })),
   );
-  const activeProduct = taggedProducts.find((product) => product.id === activeId) ?? mainProducts[0] ?? taggedProducts[0];
+  const visibleMoments = showAllMoments ? groupedMoments : groupedMoments.slice(0, 40);
+  const activeProduct = taggedProducts.find((product) => product.id === activeId) ?? linkedProducts[0] ?? taggedProducts[0];
   const progressIndex = eventOrder.indexOf(eventType);
   const progress = status === "complete" ? 100 : Math.max(6, ((Math.max(0, progressIndex) + 1) / eventOrder.length) * 100);
 
@@ -324,6 +324,7 @@ export default function Home() {
         height: "100%",
         host: "https://www.youtube-nocookie.com",
         playerVars: {
+          autoplay: 1,
           playsinline: 1,
           rel: 0,
           origin: window.location.origin,
@@ -333,6 +334,10 @@ export default function Home() {
             if (cancelled) return;
             youtubePlayerRef.current = player;
             setVideoReady(true);
+            // Muted autoplay is permitted by modern browsers and gives the user
+            // immediate playback while the backend analyzes the same source.
+            player.mute();
+            player.playVideo();
             if (pendingSeekRef.current !== null) {
               player.seekTo(pendingSeekRef.current, true);
               player.playVideo();
@@ -348,7 +353,7 @@ export default function Home() {
           const time = player.getCurrentTime();
           if (!Number.isFinite(time)) return;
           setCurrentTime(time);
-          setActiveAppearance((current) => current && Math.abs(time - current.startSec) > 4 ? null : current);
+          setActiveAppearance((current) => current && Math.abs(time - current.startSec) > APPEARANCE_MATCH_WINDOW_SEC ? null : current);
         } catch { /* the player may be between states */ }
       }, 500);
     }).catch(() => {
@@ -461,7 +466,6 @@ export default function Home() {
     if (!videoUrl) return;
     try { new URL(videoUrl); } catch { setError("Paste a complete YouTube, TikTok, or Instagram URL."); setStatus("error"); return; }
     const handoff = withSurfaceTransition(() => {
-      setSurfaceSettling(true);
       setStatus("starting");
       setEventType("retrieving_video");
       setEventHistory(["retrieving_video"]);
@@ -470,6 +474,7 @@ export default function Home() {
       setActiveAppearance(null);
       setError("");
       setMobileResults(false);
+      setShowAllMoments(false);
       setVideoReady(false);
       setMediaAvailable(false);
       setVideoDimensions({ width: 16, height: 9 });
@@ -477,12 +482,15 @@ export default function Home() {
       setSourceUrl(videoUrl);
     });
     surfaceHandoffRef.current = handoff;
-    void handoff.finally(() => setSurfaceSettling(false));
     try {
       const response = await fetch("/api/jobs", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ url: videoUrl, focus: focus.trim() || undefined }),
+        // Job creation should return immediately. If the local processor has
+        // stopped, fail visibly instead of leaving the progress UI at its first
+        // (13%) step forever.
+        signal: AbortSignal.timeout(20_000),
       });
       const data = await responseJson(response);
       if (!response.ok) throw new Error(responseMessage(data, "The video processor is unavailable."));
@@ -491,7 +499,13 @@ export default function Home() {
       await handoff;
       await withSurfaceTransition(() => {
         setStatus("error");
-        setError(reason instanceof Error ? reason.message : "Could not start this video.");
+        setError(
+          reason instanceof DOMException && reason.name === "TimeoutError"
+            ? "The local video processor did not respond. Restart Spotted and try again."
+            : reason instanceof Error
+              ? reason.message
+              : "Could not start this video.",
+        );
       });
     }
   }
@@ -503,11 +517,11 @@ export default function Home() {
     form.append("file", file);
     if (focus.trim()) form.append("focus", focus.trim());
     const handoff = withSurfaceTransition(() => {
-      setSurfaceSettling(true);
       setStatus("starting");
       setEventType("retrieving_video");
       setEventHistory(["retrieving_video"]);
       setProducts([]);
+      setShowAllMoments(false);
       setActiveId("");
       setActiveAppearance(null);
       setError("");
@@ -519,7 +533,6 @@ export default function Home() {
       pendingSeekRef.current = null;
     });
     surfaceHandoffRef.current = handoff;
-    void handoff.finally(() => setSurfaceSettling(false));
     try {
       const response = await fetch("/api/jobs/upload", { method: "POST", body: form });
       const data = await responseJson(response);
@@ -543,6 +556,7 @@ export default function Home() {
       setJobId(null);
       setStatus("idle");
       setProducts([]);
+      setShowAllMoments(false);
       setEventHistory([]);
       setActiveId("");
       setActiveAppearance(null);
@@ -587,12 +601,15 @@ export default function Home() {
   const workspaceVisible = status === "starting" || status === "running" || status === "complete";
   const nearbyTag = taggedProducts
     .flatMap((product) => product.appearances.map((appearance) => ({ product, appearance })))
-    .filter(({ appearance }) => Math.abs(currentTime - appearance.startSec) <= 3)
+    .filter(({ appearance }) => Math.abs(currentTime - appearance.startSec) <= APPEARANCE_MATCH_WINDOW_SEC)
     .sort((left, right) => Math.abs(currentTime - left.appearance.startSec) - Math.abs(currentTime - right.appearance.startSec))[0];
-  const currentAppearance = activeAppearance && Math.abs(currentTime - activeAppearance.startSec) <= 3
+  const selectedAppearanceIsCurrent = Boolean(
+    activeAppearance && Math.abs(currentTime - activeAppearance.startSec) <= APPEARANCE_MATCH_WINDOW_SEC,
+  );
+  const currentAppearance = selectedAppearanceIsCurrent
     ? activeAppearance
     : nearbyTag?.appearance;
-  const currentTagProduct = activeAppearance && activeProduct ? activeProduct : nearbyTag?.product;
+  const currentTagProduct = selectedAppearanceIsCurrent && activeProduct ? activeProduct : nearbyTag?.product;
   const currentBox = currentAppearance?.boundingBox;
 
   return (
@@ -652,7 +669,7 @@ export default function Home() {
         )}
 
         {workspaceVisible && (
-          <section className={`workspace ${status === "running" || status === "starting" ? "is-running" : ""} ${surfaceSettling ? "is-entering" : ""}`} aria-label="Video findings workspace">
+          <section className={`workspace ${status === "running" || status === "starting" ? "is-running" : ""}`} aria-label="Video findings workspace">
           <div className="video-column">
             <div className="panel-heading">
               <div><span className="step-number">01</span><div><strong>Video</strong><small>{jobId ? `${platform} · Job ${jobId.slice(0, 8)}` : "Creating secure session"}</small></div></div>
@@ -667,7 +684,7 @@ export default function Home() {
                   style={{ backgroundImage: `url(https://i.ytimg.com/vi/${youtubeId}/hqdefault.jpg)` }}
                 />
               ) : jobId && mediaAvailable ? (
-                <video ref={videoRef} controls playsInline preload="metadata" src={`/api/jobs/${encodeURIComponent(jobId)}/media`} onCanPlay={(event) => { setVideoReady(true); if (event.currentTarget.videoWidth && event.currentTarget.videoHeight) setVideoDimensions({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight }); }} onTimeUpdate={(event) => { setCurrentTime(event.currentTarget.currentTime); if (activeAppearance && Math.abs(event.currentTarget.currentTime - activeAppearance.startSec) > 3) setActiveAppearance(null); }} />
+                <video ref={videoRef} controls playsInline preload="metadata" src={`/api/jobs/${encodeURIComponent(jobId)}/media`} onCanPlay={(event) => { setVideoReady(true); if (event.currentTarget.videoWidth && event.currentTarget.videoHeight) setVideoDimensions({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight }); }} onTimeUpdate={(event) => { setCurrentTime(event.currentTarget.currentTime); if (activeAppearance && Math.abs(event.currentTarget.currentTime - activeAppearance.startSec) > APPEARANCE_MATCH_WINDOW_SEC) setActiveAppearance(null); }} />
               ) : null}
               {!youtubeId && <div className="video-loading" aria-hidden={videoReady}>
                 <div className="scan-orbit"><span>AI</span><i /><i /><i /></div>
@@ -679,16 +696,16 @@ export default function Home() {
             </div>
             <div className="moments">
               <div><span className="moment-count">{taggedProducts.length.toString().padStart(2, "0")}</span><span>Tagged products<br />repeat sightings grouped</span></div>
-              <div className="moment-list">{groupedMoments.map(({ product, group }) => <button key={`${product.id}-${group.first.startSec}`} className={activeId === product.id && currentTime >= group.first.startSec - 0.75 && currentTime <= group.lastSec + 0.75 ? "active" : ""} title={group.count > 1 ? `${group.count} nearby sampled appearances grouped` : group.first.evidence} onClick={() => seek(product, group.first)}><span>{appearanceGroupLabel(group)}</span>{product.brand || product.name}</button>)}</div>
+              <div className="moment-list">{visibleMoments.map(({ product, group }) => <button key={`${product.id}-${group.first.startSec}`} className={activeId === product.id && currentTime >= group.first.startSec - 0.75 && currentTime <= group.lastSec + 0.75 ? "active" : ""} title={group.count > 1 ? `${group.count} nearby sampled appearances grouped` : group.first.evidence} onClick={() => seek(product, group.first)}><span>{appearanceGroupLabel(group)}</span>{product.brand || product.name}</button>)}{groupedMoments.length > 40 && <button className="moment-more" onClick={() => setShowAllMoments((value) => !value)}>{showAllMoments ? "Show fewer" : `Show all ${groupedMoments.length} sightings`}</button>}</div>
             </div>
           </div>
 
           <div className={`results-column ${mobileResults ? "mobile-open" : ""}`}>
             <div className="panel-heading">
-              <div><span className="step-number">02</span><div><strong>Findings</strong><small>{status === "complete" ? `${mainProducts.length} verified products` : eventCopy[eventType]}</small></div></div>
+              <div><span className="step-number">02</span><div><strong>Findings</strong><small>{status === "complete" ? `${mainProducts.length} verified · ${possibleProducts.length} possible · ${detectedOnlyProducts.length} detected` : eventCopy[eventType]}</small></div></div>
               {status === "complete" && <span className="complete-badge"><i />Complete</span>}
             </div>
-            {status !== "complete" && mainProducts.length === 0 ? (
+            {status !== "complete" && linkedProducts.length === 0 ? (
               <div className="processing" aria-live="polite">
                 <div className="scan-orbit"><span>{Math.round(progress)}%</span><i /><i /><i /></div>
                 <h2>{eventCopy[eventType]}</h2>
@@ -699,9 +716,10 @@ export default function Home() {
             ) : (
               <div className="findings-scroll">
                 <div className="results-summary"><div><strong>{mainProducts.length.toString().padStart(2, "0")}</strong><span>Verified shopping<br />matches</span></div><p><i />Exact match <b>{mainProducts.filter((product) => product.matchKind === "exact").length}</b></p></div>
-                {mainProducts.length === 0 && <div className="no-findings"><h2>No verified shopping matches</h2><p>Spotted detected objects, but none passed both retailer-page and visual verification.</p></div>}
+                {linkedProducts.length === 0 && <div className="no-findings"><h2>No shopping matches found</h2><p>Spotted detected objects, but no retailer candidate passed the minimum visual and page checks.</p></div>}
                 <div className="product-list">{mainProducts.map((product, index) => <ProductCard key={product.id} product={product} index={index} active={activeId === product.id} onSelect={() => setActiveId(product.id)} onTime={(appearance) => seek(product, appearance)} />)}</div>
-                {unmatchedProducts.length > 0 && <div className="unmatched-summary"><strong>{unmatchedProducts.length} additional {unmatchedProducts.length === 1 ? "object was" : "objects were"} detected</strong><span>No retailer match passed visual verification, so {unmatchedProducts.length === 1 ? "it is" : "they are"} not shown as shopping results.</span></div>}
+                {possibleProducts.length > 0 && <section className="possible-section" aria-label="Possible matches"><div className="possible-title"><span>Possible matches</span><small>Visually plausible · not verified as exact</small></div><div className="product-list">{possibleProducts.map((product, index) => <ProductCard key={product.id} product={product} index={mainProducts.length + index} active={activeId === product.id} onSelect={() => setActiveId(product.id)} onTime={(appearance) => seek(product, appearance)} />)}</div></section>}
+                {detectedOnlyProducts.length > 0 && <section className="detected-section" aria-label="Detected items"><div className="possible-title"><span>Detected items</span><small>Found in the video · no reliable retailer yet</small></div><div className="product-list">{detectedOnlyProducts.map((product, index) => <ProductCard key={product.id} product={product} index={linkedProducts.length + index} active={activeId === product.id} onSelect={() => setActiveId(product.id)} onTime={(appearance) => seek(product, appearance)} />)}</div></section>}
               </div>
             )}
           </div>
@@ -709,14 +727,15 @@ export default function Home() {
         )}
       </div>
 
-      {workspaceVisible && <button className="mobile-toggle" onClick={() => setMobileResults((value) => !value)}>{mobileResults ? "Show video" : `Show ${mainProducts.length} matches`} <span>↗</span></button>}
-      <footer><div className="logo footer-logo"><span>Spotted</span><i aria-hidden="true" /></div><p>Spotted studies the scenes, identifies what matters, and finds the closest products you can actually buy.</p><span>Built for the OpenAI hackathon · 2026</span></footer>
+      {workspaceVisible && <button className="mobile-toggle" onClick={() => setMobileResults((value) => !value)}>{mobileResults ? "Show video" : `Show ${linkedProducts.length} matches`} <span>↗</span></button>}
+      <footer><span>Built for the OpenAI hackathon · 2026</span></footer>
     </main>
   );
 }
 
 function ProductCard({ product, index, active, onSelect, onTime }: { product: ProductFinding; index: number; active: boolean; onSelect: () => void; onTime: (appearance: Appearance) => void }) {
   const [imageFailed, setImageFailed] = useState(false);
+  const linked = Boolean(product.productUrl);
   const image = product.imageUrl || product.appearances[0]?.thumbnailUrl;
   const appearanceGroups = groupAppearances(product.appearances);
   return (
@@ -731,11 +750,11 @@ function ProductCard({ product, index, active, onSelect, onTime }: { product: Pr
         <small>{String(index + 1).padStart(2, "0")}</small>
       </button>
       <div className="product-copy">
-        <div className="product-meta"><span className={`match-label ${product.matchKind}`}>{product.matchKind}</span><span>{productPercent(product.matchConfidence ?? product.confidence)}% match confidence</span></div>
+        <div className="product-meta"><span className={`match-label ${linked ? product.matchKind : "detected"}`}>{linked ? product.matchKind : "detected"}</span><span>{productPercent(linked ? product.matchConfidence ?? product.confidence : product.detectionConfidence ?? product.confidence)}% {linked ? "match" : "detection"} confidence</span></div>
         <p>{product.brand || product.category}</p><h3>{product.name}</h3><small>{product.category}{product.model ? ` · ${product.model}` : ""}</small>
         <div className="timestamps"><span>Seen</span>{appearanceGroups.map((group) => <button key={group.first.startSec} title={group.count > 1 ? `${group.count} nearby sampled appearances grouped` : group.first.evidence} onClick={() => onTime(group.first)}>{appearanceGroupLabel(group)}</button>)}</div>
       </div>
-      <div className="product-shop">{product.price && <strong>{product.price}</strong>}<small>{product.retailerName ? `at ${product.retailerName}` : "Verified retailer"}</small>{product.productUrl && <a href={product.productUrl} target="_blank" rel="noopener noreferrer">View product <span>↗</span></a>}</div>
+      <div className="product-shop">{product.price && <strong>{product.price}</strong>}<small>{product.retailerName ? `at ${product.retailerName}` : !linked ? "Awaiting product match" : product.matchKind === "possible" ? "Candidate retailer" : "Verified retailer"}</small>{product.productUrl && <a href={product.productUrl} target="_blank" rel="noopener noreferrer">View product <span>↗</span></a>}</div>
     </article>
   );
 }
