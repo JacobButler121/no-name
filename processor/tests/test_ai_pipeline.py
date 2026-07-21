@@ -21,9 +21,10 @@ from processor.models import (
     FrameManifest,
     MatchKind,
     ProductCandidate,
+    ProductFinding,
 )
 from processor.search import RetailerSearchService
-from processor.search.retailer import _cropped_frame_path
+from processor.search.retailer import _cropped_frame_path, _group_catalog_findings
 from processor.search.lens import GoogleLensSearchClient, LensCandidate
 from processor.search.validation import ProductPageMetadata
 
@@ -530,6 +531,16 @@ class LivePipelineTests(unittest.TestCase):
         with patch.dict("os.environ", {"SPOTTED_OPENAI_MODEL": "custom-vision-model"}):
             self.assertEqual(OpenAIResponsesClient(api_key="test").model, "custom-vision-model")
 
+    def test_high_recall_inventory_defaults_are_configurable(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"SPOTTED_MAX_PRODUCTS": "64", "SPOTTED_ANALYSIS_WORKERS": "4"},
+        ):
+            pipeline = ProductAnalysisPipeline(client=FakeClient([]))
+        self.assertEqual(pipeline.focused_limit, 64)
+        self.assertEqual(pipeline.broad_limit, 64)
+        self.assertEqual(pipeline.analysis_workers, 4)
+
     def test_missing_api_key_raises_clear_error_without_network(self) -> None:
         client = OpenAIResponsesClient(api_key="")
         with self.assertRaisesRegex(AnalysisConfigurationError, "OPENAI_API_KEY"):
@@ -646,6 +657,67 @@ class LivePipelineTests(unittest.TestCase):
 
 
 class RetailSearchTests(unittest.TestCase):
+    def test_catalog_grouping_combines_repeated_tracks_and_timestamps(self) -> None:
+        first = ProductFinding(
+            id="origin-closeup",
+            name="Shaper Origin Handheld CNC Router",
+            category="power tool",
+            match_kind=MatchKind.EXACT,
+            confidence=0.97,
+            match_confidence=0.98,
+            detection_confidence=0.97,
+            brand="Shaper",
+            model="Origin",
+            retailer_name="Shaper",
+            product_url="https://www.shapertools.com/en-us/origin?variant=so2",
+            appearances=[Appearance(start_sec=10, evidence="Close-up")],
+        )
+        second = ProductFinding(
+            id="origin-bench",
+            name="Shaper Origin CNC Router",
+            category="workshop equipment",
+            match_kind=MatchKind.SIMILAR,
+            confidence=0.91,
+            match_confidence=0.92,
+            detection_confidence=0.99,
+            brand="Shaper",
+            model="Origin",
+            retailer_name="Woodcraft",
+            product_url="https://www.woodcraft.com/products/shaper-origin",
+            appearances=[Appearance(start_sec=800, evidence="On workbench")],
+        )
+
+        grouped = _group_catalog_findings([first, second])
+
+        self.assertEqual(len(grouped), 1)
+        self.assertEqual(grouped[0].id, "origin-closeup")
+        self.assertEqual(
+            [appearance.start_sec for appearance in grouped[0].appearances],
+            [10, 800],
+        )
+        self.assertEqual(grouped[0].detection_confidence, 0.99)
+        self.assertEqual(len(grouped[0].alternatives), 1)
+
+    def test_catalog_grouping_does_not_merge_unidentified_similar_objects(self) -> None:
+        left = ProductFinding(
+            id="left",
+            name="White table lamp",
+            category="lamp",
+            match_kind=MatchKind.POSSIBLE,
+            confidence=0.9,
+            appearances=[Appearance(start_sec=1, evidence="Left lamp")],
+        )
+        right = ProductFinding(
+            id="right",
+            name="White table lamp",
+            category="lamp",
+            match_kind=MatchKind.POSSIBLE,
+            confidence=0.9,
+            appearances=[Appearance(start_sec=1, evidence="Right lamp")],
+        )
+
+        self.assertEqual(len(_group_catalog_findings([left, right])), 2)
+
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg required")
     def test_small_object_crop_is_padded_and_upscaled_to_512_pixels_wide(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

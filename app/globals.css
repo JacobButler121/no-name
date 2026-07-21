@@ -351,6 +351,24 @@ footer{margin-top:46px;border-top:1px solid rgba(17,18,16,.1)}
   box-shadow:0 0 0 4px rgba(223,255,117,.14);
 }
 
+/* High-recall scans can return dozens of detections. Keep unmatched inventory
+   visible without letting the video timeline grow without bound. */
+.detected-section{
+  border-top:9px solid var(--soft);
+}
+.match-label.detected{
+  background:#eef0ef;
+  border-color:#bfc6c2;
+}
+.detected-section .product-card{
+  background:#fafaf7;
+}
+.moment-list .moment-more{
+  border-style:dashed;
+  color:var(--ink);
+  font-weight:650;
+}
+
 @media(max-width:900px){
   .is-landing .experience-stage{padding:24px 0 36px;transform:translateY(14px)}
   .is-landing .intro{padding-bottom:34px}

@@ -248,6 +248,7 @@ export default function Home() {
   const [currentTime, setCurrentTime] = useState(0);
   const [error, setError] = useState("");
   const [mobileResults, setMobileResults] = useState(false);
+  const [showAllMoments, setShowAllMoments] = useState(false);
   const [videoReady, setVideoReady] = useState(false);
   const [mediaAvailable, setMediaAvailable] = useState(false);
   const [videoDimensions, setVideoDimensions] = useState({ width: 16, height: 9 });
@@ -266,10 +267,12 @@ export default function Home() {
   const mainProducts = products.filter((product) => product.matchKind !== "possible" && Boolean(product.productUrl));
   const possibleProducts = products.filter((product) => product.matchKind === "possible" && Boolean(product.productUrl));
   const linkedProducts = [...mainProducts, ...possibleProducts];
+  const detectedOnlyProducts = products.filter((product) => !product.productUrl);
   const taggedProducts = products.filter((product) => product.appearances.length > 0);
   const groupedMoments = taggedProducts.flatMap((product) =>
     groupAppearances(product.appearances).map((group) => ({ product, group })),
   );
+  const visibleMoments = showAllMoments ? groupedMoments : groupedMoments.slice(0, 40);
   const activeProduct = taggedProducts.find((product) => product.id === activeId) ?? linkedProducts[0] ?? taggedProducts[0];
   const progressIndex = eventOrder.indexOf(eventType);
   const progress = status === "complete" ? 100 : Math.max(6, ((Math.max(0, progressIndex) + 1) / eventOrder.length) * 100);
@@ -471,6 +474,7 @@ export default function Home() {
       setActiveAppearance(null);
       setError("");
       setMobileResults(false);
+      setShowAllMoments(false);
       setVideoReady(false);
       setMediaAvailable(false);
       setVideoDimensions({ width: 16, height: 9 });
@@ -517,6 +521,7 @@ export default function Home() {
       setEventType("retrieving_video");
       setEventHistory(["retrieving_video"]);
       setProducts([]);
+      setShowAllMoments(false);
       setActiveId("");
       setActiveAppearance(null);
       setError("");
@@ -551,6 +556,7 @@ export default function Home() {
       setJobId(null);
       setStatus("idle");
       setProducts([]);
+      setShowAllMoments(false);
       setEventHistory([]);
       setActiveId("");
       setActiveAppearance(null);
@@ -690,13 +696,13 @@ export default function Home() {
             </div>
             <div className="moments">
               <div><span className="moment-count">{taggedProducts.length.toString().padStart(2, "0")}</span><span>Tagged products<br />repeat sightings grouped</span></div>
-              <div className="moment-list">{groupedMoments.map(({ product, group }) => <button key={`${product.id}-${group.first.startSec}`} className={activeId === product.id && currentTime >= group.first.startSec - 0.75 && currentTime <= group.lastSec + 0.75 ? "active" : ""} title={group.count > 1 ? `${group.count} nearby sampled appearances grouped` : group.first.evidence} onClick={() => seek(product, group.first)}><span>{appearanceGroupLabel(group)}</span>{product.brand || product.name}</button>)}</div>
+              <div className="moment-list">{visibleMoments.map(({ product, group }) => <button key={`${product.id}-${group.first.startSec}`} className={activeId === product.id && currentTime >= group.first.startSec - 0.75 && currentTime <= group.lastSec + 0.75 ? "active" : ""} title={group.count > 1 ? `${group.count} nearby sampled appearances grouped` : group.first.evidence} onClick={() => seek(product, group.first)}><span>{appearanceGroupLabel(group)}</span>{product.brand || product.name}</button>)}{groupedMoments.length > 40 && <button className="moment-more" onClick={() => setShowAllMoments((value) => !value)}>{showAllMoments ? "Show fewer" : `Show all ${groupedMoments.length} sightings`}</button>}</div>
             </div>
           </div>
 
           <div className={`results-column ${mobileResults ? "mobile-open" : ""}`}>
             <div className="panel-heading">
-              <div><span className="step-number">02</span><div><strong>Findings</strong><small>{status === "complete" ? `${mainProducts.length} verified · ${possibleProducts.length} possible` : eventCopy[eventType]}</small></div></div>
+              <div><span className="step-number">02</span><div><strong>Findings</strong><small>{status === "complete" ? `${mainProducts.length} verified · ${possibleProducts.length} possible · ${detectedOnlyProducts.length} detected` : eventCopy[eventType]}</small></div></div>
               {status === "complete" && <span className="complete-badge"><i />Complete</span>}
             </div>
             {status !== "complete" && linkedProducts.length === 0 ? (
@@ -713,6 +719,7 @@ export default function Home() {
                 {linkedProducts.length === 0 && <div className="no-findings"><h2>No shopping matches found</h2><p>Spotted detected objects, but no retailer candidate passed the minimum visual and page checks.</p></div>}
                 <div className="product-list">{mainProducts.map((product, index) => <ProductCard key={product.id} product={product} index={index} active={activeId === product.id} onSelect={() => setActiveId(product.id)} onTime={(appearance) => seek(product, appearance)} />)}</div>
                 {possibleProducts.length > 0 && <section className="possible-section" aria-label="Possible matches"><div className="possible-title"><span>Possible matches</span><small>Visually plausible · not verified as exact</small></div><div className="product-list">{possibleProducts.map((product, index) => <ProductCard key={product.id} product={product} index={mainProducts.length + index} active={activeId === product.id} onSelect={() => setActiveId(product.id)} onTime={(appearance) => seek(product, appearance)} />)}</div></section>}
+                {detectedOnlyProducts.length > 0 && <section className="detected-section" aria-label="Detected items"><div className="possible-title"><span>Detected items</span><small>Found in the video · no reliable retailer yet</small></div><div className="product-list">{detectedOnlyProducts.map((product, index) => <ProductCard key={product.id} product={product} index={linkedProducts.length + index} active={activeId === product.id} onSelect={() => setActiveId(product.id)} onTime={(appearance) => seek(product, appearance)} />)}</div></section>}
               </div>
             )}
           </div>
@@ -728,6 +735,7 @@ export default function Home() {
 
 function ProductCard({ product, index, active, onSelect, onTime }: { product: ProductFinding; index: number; active: boolean; onSelect: () => void; onTime: (appearance: Appearance) => void }) {
   const [imageFailed, setImageFailed] = useState(false);
+  const linked = Boolean(product.productUrl);
   const image = product.imageUrl || product.appearances[0]?.thumbnailUrl;
   const appearanceGroups = groupAppearances(product.appearances);
   return (
@@ -742,11 +750,11 @@ function ProductCard({ product, index, active, onSelect, onTime }: { product: Pr
         <small>{String(index + 1).padStart(2, "0")}</small>
       </button>
       <div className="product-copy">
-        <div className="product-meta"><span className={`match-label ${product.matchKind}`}>{product.matchKind}</span><span>{productPercent(product.matchConfidence ?? product.confidence)}% match confidence</span></div>
+        <div className="product-meta"><span className={`match-label ${linked ? product.matchKind : "detected"}`}>{linked ? product.matchKind : "detected"}</span><span>{productPercent(linked ? product.matchConfidence ?? product.confidence : product.detectionConfidence ?? product.confidence)}% {linked ? "match" : "detection"} confidence</span></div>
         <p>{product.brand || product.category}</p><h3>{product.name}</h3><small>{product.category}{product.model ? ` · ${product.model}` : ""}</small>
         <div className="timestamps"><span>Seen</span>{appearanceGroups.map((group) => <button key={group.first.startSec} title={group.count > 1 ? `${group.count} nearby sampled appearances grouped` : group.first.evidence} onClick={() => onTime(group.first)}>{appearanceGroupLabel(group)}</button>)}</div>
       </div>
-      <div className="product-shop">{product.price && <strong>{product.price}</strong>}<small>{product.retailerName ? `at ${product.retailerName}` : product.matchKind === "possible" ? "Candidate retailer" : "Verified retailer"}</small>{product.productUrl && <a href={product.productUrl} target="_blank" rel="noopener noreferrer">View product <span>↗</span></a>}</div>
+      <div className="product-shop">{product.price && <strong>{product.price}</strong>}<small>{product.retailerName ? `at ${product.retailerName}` : !linked ? "Awaiting product match" : product.matchKind === "possible" ? "Candidate retailer" : "Verified retailer"}</small>{product.productUrl && <a href={product.productUrl} target="_blank" rel="noopener noreferrer">View product <span>↗</span></a>}</div>
     </article>
   );
 }

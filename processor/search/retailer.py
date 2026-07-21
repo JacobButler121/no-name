@@ -10,6 +10,7 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 from processor.ai.client import OpenAIResponsesClient
 from processor.models import (
@@ -243,6 +244,170 @@ def _is_inaccessible_image_error(exc: AnalysisError) -> bool:
     )
 
 
+_CATALOG_NAME_NOISE = {
+    "and", "with", "the", "for", "tool", "tools", "equipment", "product",
+    "kit", "bundle", "system", "machine", "handheld", "cordless", "router",
+    "cnc", "workshop", "component", "variant", "generation", "gen",
+}
+
+
+def _catalog_url(value: str | None) -> str | None:
+    """Normalize retailer URLs to a stable product-page identity."""
+    if not value:
+        return None
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    host = parsed.netloc.casefold()
+    if host.startswith("www."):
+        host = host[4:]
+    path = re.sub(r"/+", "/", unquote(parsed.path)).rstrip("/") or "/"
+    # Tracking and variant query strings frequently make one catalog product
+    # look like several URLs. Variant detail remains available in the title.
+    return urlunsplit(("https", host, path.casefold(), "", ""))
+
+
+def _catalog_name_tokens(*values: str | None) -> set[str]:
+    return {
+        token
+        for value in values
+        if value
+        for token in re.findall(r"[a-z0-9]+", value.casefold())
+        if len(token) >= 2 and token not in _CATALOG_NAME_NOISE
+    }
+
+
+def _same_catalog_product(left: ProductFinding, right: ProductFinding) -> bool:
+    left_url, right_url = _catalog_url(left.product_url), _catalog_url(right.product_url)
+    if left_url and right_url and left_url == right_url:
+        return True
+
+    left_brand = " ".join(sorted(_catalog_name_tokens(left.brand)))
+    right_brand = " ".join(sorted(_catalog_name_tokens(right.brand)))
+    left_model = _catalog_name_tokens(left.model)
+    right_model = _catalog_name_tokens(right.model)
+    if left_brand and left_brand == right_brand and left_model and right_model:
+        if left_model == right_model or left_model.issubset(right_model) or right_model.issubset(left_model):
+            return True
+
+    # After visual verification, differently worded retailer titles can still
+    # describe one product family. Require the same explicit brand and at least
+    # two shared distinctive name/model terms before grouping across URLs.
+    if left_brand and left_brand == right_brand and left.product_url and right.product_url:
+        left_terms = _catalog_name_tokens(left.name, left.model)
+        right_terms = _catalog_name_tokens(right.name, right.model)
+        shared = left_terms & right_terms
+        union = left_terms | right_terms
+        if len(shared) >= 2 and union and len(shared) / len(union) >= 0.35:
+            return True
+    return False
+
+
+def _finding_rank(item: ProductFinding) -> tuple[int, float, float]:
+    kind_rank = {
+        MatchKind.EXACT: 2,
+        MatchKind.SIMILAR: 1,
+        MatchKind.POSSIBLE: 0,
+    }[item.match_kind]
+    return (
+        kind_rank,
+        item.match_confidence or 0.0,
+        item.detection_confidence or item.confidence,
+    )
+
+
+def _group_catalog_findings(findings: Iterable[ProductFinding]) -> list[ProductFinding]:
+    """Group verified tracks that resolve to one catalog product.
+
+    Detection deliberately preserves separate physical instances. This second
+    pass collapses repeated sightings only after a retailer URL or brand/model
+    identity exists, retaining every timestamp and alternate retailer page.
+    """
+    groups: list[list[ProductFinding]] = []
+    for finding in findings:
+        group = next(
+            (
+                existing
+                for existing in groups
+                if any(_same_catalog_product(finding, item) for item in existing)
+            ),
+            None,
+        )
+        if group is None:
+            groups.append([finding])
+        else:
+            group.append(finding)
+
+    result: list[ProductFinding] = []
+    for group in groups:
+        primary = max(group, key=_finding_rank)
+        appearance_keys: set[tuple[Any, ...]] = set()
+        appearances: list[Appearance] = []
+        for item in group:
+            for appearance in item.appearances:
+                box = appearance.bounding_box.to_dict() if appearance.bounding_box else {}
+                key = (
+                    round(appearance.start_sec, 3),
+                    appearance.thumbnail_url,
+                    *(round(float(box.get(name, -1)), 4) for name in ("x", "y", "width", "height")),
+                )
+                if key not in appearance_keys:
+                    appearance_keys.add(key)
+                    appearances.append(appearance)
+
+        alternatives: list[RetailMatch] = []
+        seen_urls = {_catalog_url(primary.product_url)}
+        for item in group:
+            if item is not primary and item.product_url:
+                candidate_url = _catalog_url(item.product_url)
+                if candidate_url not in seen_urls:
+                    alternatives.append(
+                        RetailMatch(
+                            product_name=item.name,
+                            retailer_name=item.retailer_name or "Retailer",
+                            product_url=item.product_url,
+                            match_kind=item.match_kind,
+                            confidence=item.match_confidence or item.confidence,
+                            evidence="Same catalog product detected in another video track.",
+                            image_url=item.image_url,
+                            price=item.price,
+                        )
+                    )
+                    seen_urls.add(candidate_url)
+            for alternative in item.alternatives:
+                candidate_url = _catalog_url(alternative.product_url)
+                if candidate_url not in seen_urls:
+                    alternatives.append(alternative)
+                    seen_urls.add(candidate_url)
+
+        result.append(
+            ProductFinding(
+                id=primary.id,
+                name=primary.name,
+                category=primary.category,
+                match_kind=primary.match_kind,
+                confidence=primary.confidence,
+                appearances=sorted(appearances, key=lambda item: item.start_sec),
+                detection_confidence=max(
+                    (item.detection_confidence or item.confidence for item in group),
+                    default=primary.detection_confidence,
+                ),
+                match_confidence=primary.match_confidence,
+                brand=primary.brand or next((item.brand for item in group if item.brand), None),
+                model=primary.model or next((item.model for item in group if item.model), None),
+                retailer_name=primary.retailer_name,
+                product_url=primary.product_url,
+                image_url=primary.image_url,
+                price=primary.price,
+                alternatives=sorted(alternatives, key=lambda item: item.confidence, reverse=True),
+            )
+        )
+    return result
+
+
 class RetailerSearchService:
     def __init__(
         self,
@@ -254,6 +419,7 @@ class RetailerSearchService:
         match_model: str | None = None,
         image_detail: str | None = None,
         lens_client: GoogleLensSearchClient | None = None,
+        search_workers: int | None = None,
     ) -> None:
         if not 1 <= candidate_limit <= 8:
             raise ValueError("candidate_limit must be between 1 and 8")
@@ -263,6 +429,12 @@ class RetailerSearchService:
         self.metadata_fetcher = metadata_fetcher
         self.candidate_limit = candidate_limit
         self.target_crop_limit = target_crop_limit
+        self.search_workers = max(
+            1,
+            search_workers
+            if search_workers is not None
+            else int(os.getenv("SPOTTED_SEARCH_WORKERS", "6")),
+        )
         self.match_model = match_model or os.getenv(
             "SPOTTED_MATCH_MODEL", "gpt-5.6-terra"
         )
@@ -870,7 +1042,6 @@ class RetailerSearchService:
             price=primary.price if primary else None,
             alternatives=matches[1:],
         )
-        _emit(event_callback, "product_ready", finding.to_dict())
         return finding
 
     def enrich_all(
@@ -879,11 +1050,29 @@ class RetailerSearchService:
         *,
         event_callback: EventCallback | None = None,
     ) -> list[ProductFinding]:
-        return [
-            self.enrich(candidate, event_callback=event_callback)
-            for candidate in candidates
-            if candidate.confidence >= 0.7
-        ]
+        selected = [candidate for candidate in candidates if candidate.confidence >= 0.7]
+        if self.search_workers == 1 or len(selected) <= 1:
+            enriched = [
+                self.enrich(candidate, event_callback=event_callback)
+                for candidate in selected
+            ]
+        else:
+            with ThreadPoolExecutor(
+                max_workers=min(self.search_workers, len(selected)),
+                thread_name_prefix="spotted-product-search",
+            ) as executor:
+                enriched = list(
+                    executor.map(
+                        lambda candidate: self.enrich(
+                            candidate, event_callback=event_callback
+                        ),
+                        selected,
+                    )
+                )
+        grouped = _group_catalog_findings(enriched)
+        for finding in grouped:
+            _emit(event_callback, "product_ready", finding.to_dict())
+        return grouped
 
 
 def enrich_candidates(
